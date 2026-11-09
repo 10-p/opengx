@@ -43,7 +43,11 @@ static const GLubyte gl_null_string[1] = { 0 };
 /* This is not static because we might modify it in place */
 static GLubyte s_extension_string[] =
     "GL_ARB_multitexture "
+    "GL_ARB_texture_env_add "
+    "GL_ARB_texture_env_combine "
     "GL_ARB_vertex_buffer_object "
+    "GL_EXT_texture_env_add "
+    "GL_EXT_texture_env_combine "
     "GL_EXT_paletted_texture "
     "GL_EXT_texture_compression_s3tc "
     "GL_OGX_native_texture ";

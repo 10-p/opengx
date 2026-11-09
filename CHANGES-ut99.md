@@ -15,6 +15,15 @@ sent upstream on its own. Licence unchanged (BSD-3-Clause, see the file headers)
   so the generic `GX_TEV_ADD`/`GX_TB_ZERO` op overwrote what `setup_combine_operation()` had set. That broke
   `GL_SUBTRACT` (ran as ADD) and `GL_ADD_SIGNED` (lost its -0.5 bias), and would have dropped the new scale.
 
+### Combiner extensions in `GL_EXTENSIONS`
+- `GL_ARB_texture_env_combine`, `GL_EXT_texture_env_combine`, `GL_ARB_texture_env_add`, `GL_EXT_texture_env_add`
+  are now advertised (the functionality was there; with `GL_RGB_SCALE` it is now complete enough for the usual
+  lightmap paths). All combine functions of the ARB extension (REPLACE, MODULATE, ADD, ADD_SIGNED, INTERPOLATE,
+  SUBTRACT), all sources and operands, and the scales work. Known limits, all due to one TEV stage per unit:
+  `ONE_MINUS_*` on both arguments of MODULATE/ADD, on arg0/arg1 of INTERPOLATE or on arg0 of SUBTRACT, and
+  more than one `GL_CONSTANT` per stage, are not supported (warning). `GL_DOT3_*` is not implemented, so
+  `GL_ARB_texture_env_dot3` is not advertised.
+
 ## Textures
 
 ### `GL_EXT_paletted_texture` → `GX_TF_CI8` + TLUT
