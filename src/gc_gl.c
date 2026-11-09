@@ -1586,6 +1586,24 @@ void glAlphaFunc(GLenum func, GLclampf ref)
     glparamstate.dirty.bits.dirty_alphatest = 1;
 }
 
+extern uint8_t s_efb_pixel_format;
+
+/* GX_SetBlendMode() has a single source/destination factor pair, used for
+ * the colour and the alpha channels alike. With the default EFB format
+ * (GX_PF_RGB8_Z24) there is no destination alpha, so the alpha factors don't
+ * matter and the RGB pair is all we need; otherwise, separate alpha factors
+ * can't be honoured. */
+void glBlendFuncSeparate(GLenum src_rgb, GLenum dst_rgb,
+                         GLenum src_alpha, GLenum dst_alpha)
+{
+    if ((src_alpha != src_rgb || dst_alpha != dst_rgb) &&
+        s_efb_pixel_format != GX_PF_RGB8_Z24) {
+        warning("glBlendFuncSeparate: separate alpha factors not supported, "
+                "using the RGB ones for alpha too");
+    }
+    glBlendFunc(src_rgb, dst_rgb);
+}
+
 void glBlendFunc(GLenum sfactor, GLenum dfactor)
 {
     HANDLE_CALL_LIST(BLEND_FUNC, sfactor, dfactor);
@@ -2730,6 +2748,17 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count)
     draw_done();
 
     _ogx_gpu_resources_pop();
+}
+
+void glDrawRangeElements(GLenum mode, GLuint start, GLuint end, GLsizei count,
+                         GLenum type, const GLvoid *indices)
+{
+    /* The range is only a hint */
+    if (end < start || count < 0) {
+        set_error(GL_INVALID_VALUE);
+        return;
+    }
+    glDrawElements(mode, count, type, indices);
 }
 
 void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indices)

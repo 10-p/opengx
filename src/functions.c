@@ -52,6 +52,7 @@ static const OgxProcMap s_proc_map[] = {
     PROC(glBindTexture),
     PROC(glBitmap),
     PROC(glBlendFunc),
+    PROC(glBlendFuncSeparate), /* OpenGL 1.4 */
     PROC(glBufferData), /* OpenGL 1.5 */
     PROC(glBufferSubData), /* OpenGL 1.5 */
     PROC(glCallList),
@@ -122,6 +123,7 @@ static const OgxProcMap s_proc_map[] = {
     PROC(glDrawBuffer),
     PROC(glDrawElements),
     PROC(glDrawPixels),
+    PROC(glDrawRangeElements), /* OpenGL 1.2 */
     //PROC(glEdgeFlag),
     //PROC(glEdgeFlagPointer),
     //PROC(glEdgeFlagv),
@@ -188,7 +190,7 @@ static const OgxProcMap s_proc_map[] = {
     //PROC(glGetTexGenfv),
     //PROC(glGetTexGeniv),
     //PROC(glGetTexImage),
-    //PROC(glGetTexLevelParameterfv),
+    PROC(glGetTexLevelParameterfv),
     PROC(glGetTexLevelParameteriv),
     //PROC(glGetTexParameterfv),
     //PROC(glGetTexParameteriv),

@@ -174,3 +174,14 @@ Level sizes: `ceil(w/tw) * ceil(h/th) * 32` bytes (`*64` for RGBA8), with `tw x 
   copy, and if the copy did not reach RAM fall back to peek. "Did not reach RAM" is detected by pre-zeroing the
   first tile's alpha bytes: a copy from a `GX_PF_RGB8_Z24` EFB always writes alpha 0xff. That case only
   happens in emulators (Dolphin's "Store EFB copies to texture only").
+
+## Small GL 1.2-1.4 entry points
+- `glDrawRangeElements` (the range is a hint; forwards to `glDrawElements`).
+- `glBlendFuncSeparate`: `GX_SetBlendMode()` has one factor pair for colour and alpha. With the default
+  `GX_PF_RGB8_Z24` EFB there is no destination alpha, so the RGB pair is exact; with an alpha EFB the alpha
+  factors are ignored (warning).
+- `glGetTexLevelParameter{i,f}v`: `GL_TEXTURE_WIDTH/HEIGHT/DEPTH/BORDER/INTERNAL_FORMAT`, component sizes,
+  `GL_TEXTURE_COMPRESSED(_IMAGE_SIZE)` for `GL_TEXTURE_2D` (0 for levels that don't exist), and
+  `GL_PROXY_TEXTURE_2D` (the last proxy `glTexImage2D`, accepted up to 1024x1024). The internal format is
+  derived from the GX format (`GL_RGBA8`, `GL_RGB`, `GL_RGB5_A1`, `GL_LUMINANCE(_ALPHA)`, `GL_INTENSITY`,
+  `GL_ALPHA`, `GL_COLOR_INDEX8_EXT`, DXT1 RGB/RGBA).

@@ -324,10 +324,115 @@ static uint8_t gl_scale_to_gx(GLint scale)
     }
 }
 
+/* Last glTexImage2D(GL_PROXY_TEXTURE_2D, ...) request, for the queries */
+static struct {
+    GLint width, height, internal_format;
+} s_proxy;
+
+static GLint gx_format_to_gl(uint8_t gx_format, const OgxTextureUserData *ud)
+{
+    switch (gx_format) {
+    case GX_TF_RGBA8: return GL_RGBA8;
+    case GX_TF_RGB565: return GL_RGB;
+    case GX_TF_RGB5A3: return GL_RGB5_A1;
+    case GX_TF_IA8: return GL_LUMINANCE_ALPHA;
+    case GX_TF_I8:
+        if (ud->d.is_alpha) return GL_ALPHA;
+        return ud->d.is_opaque ? GL_LUMINANCE : GL_INTENSITY;
+    case GX_TF_A8: return GL_ALPHA;
+    case GX_TF_I4: return GL_LUMINANCE4;
+    case GX_TF_CI8: return GL_COLOR_INDEX8_EXT;
+    case GX_TF_CMPR:
+        return ud->d.is_opaque ? GL_COMPRESSED_RGB_S3TC_DXT1_EXT :
+            GL_COMPRESSED_RGBA_S3TC_DXT1_EXT;
+    default: return GL_RGBA;
+    }
+}
+
+static void component_sizes(GLint internal_format, int sizes[6])
+{
+    /* r, g, b, a, luminance, intensity */
+    for (int i = 0; i < 6; i++) sizes[i] = 0;
+    switch (internal_format) {
+    case GL_RGBA8: sizes[0] = sizes[1] = sizes[2] = sizes[3] = 8; break;
+    case GL_RGB: sizes[0] = sizes[2] = 5; sizes[1] = 6; break;
+    case GL_RGB5_A1: sizes[0] = sizes[1] = sizes[2] = 5; sizes[3] = 1; break;
+    case GL_LUMINANCE_ALPHA: sizes[3] = sizes[4] = 8; break;
+    case GL_LUMINANCE: sizes[4] = 8; break;
+    case GL_INTENSITY: sizes[5] = 8; break;
+    case GL_ALPHA: sizes[3] = 8; break;
+    case GL_LUMINANCE4: sizes[4] = 4; break;
+    case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT: sizes[3] = 1; /* fall through */
+    case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
+        sizes[0] = sizes[2] = 5; sizes[1] = 6; break;
+    }
+}
+
 void glGetTexLevelParameteriv(GLenum target, GLint level,
                               GLenum pname, GLint *params)
 {
-    warning("glGetTexLevelParameteriv not implemented");
+    GLint width = 0, height = 0, internal_format = GL_RGBA;
+    bool compressed = false;
+    GLint compressed_size = 0;
+
+    if (target == GL_PROXY_TEXTURE_2D) {
+        if (level == 0) {
+            width = s_proxy.width;
+            height = s_proxy.height;
+            internal_format = s_proxy.internal_format;
+        }
+    } else if (target == GL_TEXTURE_2D) {
+        OgxTextureInfo ti;
+        if (level < 0 || level > 10) {
+            set_error(GL_INVALID_VALUE);
+            return;
+        }
+        if (_ogx_texture_get_info(curr_tex(), &ti) && ti.texels &&
+            level >= ti.minlevel && level <= ti.maxlevel) {
+            width = ti.width >> level ? ti.width >> level : 1;
+            height = ti.height >> level ? ti.height >> level : 1;
+            internal_format = gx_format_to_gl(ti.format, &ti.ud);
+            compressed = ti.format == GX_TF_CMPR;
+            compressed_size = ((width + 3) / 4) * ((height + 3) / 4) * 8;
+        }
+    } else {
+        set_error(GL_INVALID_ENUM);
+        return;
+    }
+
+    int sizes[6];
+    component_sizes(width ? internal_format : 0, sizes);
+    switch (pname) {
+    case GL_TEXTURE_WIDTH: *params = width; break;
+    case GL_TEXTURE_HEIGHT: *params = height; break;
+    case GL_TEXTURE_DEPTH: *params = width ? 1 : 0; break;
+    case GL_TEXTURE_BORDER: *params = 0; break;
+    case GL_TEXTURE_INTERNAL_FORMAT: *params = internal_format; break;
+    case GL_TEXTURE_RED_SIZE: *params = sizes[0]; break;
+    case GL_TEXTURE_GREEN_SIZE: *params = sizes[1]; break;
+    case GL_TEXTURE_BLUE_SIZE: *params = sizes[2]; break;
+    case GL_TEXTURE_ALPHA_SIZE: *params = sizes[3]; break;
+    case GL_TEXTURE_LUMINANCE_SIZE: *params = sizes[4]; break;
+    case GL_TEXTURE_INTENSITY_SIZE: *params = sizes[5]; break;
+    case GL_TEXTURE_COMPRESSED: *params = compressed; break;
+    case GL_TEXTURE_COMPRESSED_IMAGE_SIZE:
+        if (!compressed) {
+            set_error(GL_INVALID_OPERATION);
+            return;
+        }
+        *params = compressed_size;
+        break;
+    default:
+        set_error(GL_INVALID_ENUM);
+    }
+}
+
+void glGetTexLevelParameterfv(GLenum target, GLint level,
+                              GLenum pname, GLfloat *params)
+{
+    GLint value = 0;
+    glGetTexLevelParameteriv(target, level, pname, &value);
+    *params = value;
 }
 
 void glTexEnvi(GLenum target, GLenum pname, GLint param)
@@ -611,6 +716,16 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
                   GLint border, GLenum format, GLenum type, const GLvoid *data)
 {
     int tex_id = curr_tex();
+    if (target == GL_PROXY_TEXTURE_2D) {
+        /* Remember the request, for glGetTexLevelParameteriv(): GX takes
+         * up to 1024x1024 */
+        bool ok = level == 0 && width > 0 && height > 0 &&
+            width <= 1024 && height <= 1024 && border == 0;
+        s_proxy.width = ok ? width : 0;
+        s_proxy.height = ok ? height : 0;
+        s_proxy.internal_format = ok ? internalFormat : 0;
+        return;
+    }
     // Initial checks
     if (!TEXTURE_IS_RESERVED(texture_list[tex_id]))
         return;
