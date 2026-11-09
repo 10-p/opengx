@@ -304,6 +304,44 @@ static TevInput compute_tev_input(GLenum combine_func, u8 stage, GXColor color,
         reg[B] = zero_value;
         reg[D] = args[0].source;
         break;
+    case GL_MODULATE_SIGNED_ADD_ATI:
+        /* result = arg0 * arg2 + arg1 - 0.5 */
+        ret.bias = GX_TB_SUBHALF;
+        /* fall through */
+    case GL_MODULATE_ADD_ATI:
+        used_args = 3;
+        /* result = arg0 * arg2 + arg1: arg1 goes into D, which cannot be
+         * complemented; one of arg0 and arg2 can (by exchanging the roles of
+         * the interpolated pair: a * (1 - c) is "(1 - c) * a") */
+        if (args[1].must_complement)
+            warning("Cannot complement arg1 of a modulate-add");
+        if (args[0].must_complement && args[2].must_complement)
+            warning("Cannot complement both factors of a modulate-add");
+        if (args[2].must_complement) {
+            reg[A] = args[0].source; /* arg0 * (1 - arg2) */
+            reg[B] = zero_value;
+            reg[C] = args[2].source;
+        } else if (args[0].must_complement) {
+            reg[A] = args[2].source; /* arg2 * (1 - arg0) */
+            reg[B] = zero_value;
+            reg[C] = args[0].source;
+        } else {
+            reg[A] = zero_value;
+            reg[B] = args[0].source;
+            reg[C] = args[2].source;
+        }
+        reg[D] = args[1].source;
+        break;
+    case GL_MODULATE_SUBTRACT_ATI:
+        used_args = 3;
+        /* result = arg0 * arg2 - arg1: the TEV can only subtract from D
+         * (arg1 - arg0 * arg2), so this is not supported */
+        warning("GL_MODULATE_SUBTRACT_ATI is not supported; drawn as arg0 * arg2");
+        reg[A] = zero_value;
+        reg[B] = args[0].source;
+        reg[C] = args[2].source;
+        reg[D] = zero_value;
+        break;
     case GL_INTERPOLATE:
         used_args = 3;
         /* result = arg0 * arg2 + arg1 * (1 - arg2) */

@@ -24,6 +24,17 @@ sent upstream on its own. Licence unchanged (BSD-3-Clause, see the file headers)
   more than one `GL_CONSTANT` per stage, are not supported (warning). `GL_DOT3_*` is not implemented, so
   `GL_ARB_texture_env_dot3` is not advertised.
 
+### `GL_ATI_texture_env_combine3` (`GL_MODULATE_ADD_ATI`, `GL_MODULATE_SIGNED_ADD_ATI`)
+- New `GL_COMBINE_RGB`/`GL_COMBINE_ALPHA` functions `arg0 * arg2 + arg1` (and `- 0.5`), advertised as
+  `GL_ATI_texture_env_combine3`. D3D's three-operand stage ops (`MULTIPLYADD`, `MODULATEALPHA_ADDCOLOR`, ...)
+  map onto it.
+- GX mechanism: one TEV stage, `d + (a(1-c) + bc)` with `a = 0, b = arg0, c = arg2, d = arg1` (bias
+  `GX_TB_SUBHALF` for the signed form); a complemented `arg2` or `arg0` is taken by swapping the interpolated
+  pair (`arg0 * (1 - arg2)` = `a = arg0, b = 0, c = arg2`).
+- Limits (warning): `arg1` cannot be complemented (it is `d`), nor both factors at once; `GL_MODULATE_SUBTRACT_ATI`
+  (`arg0 * arg2 - arg1`) has no one-stage form (the TEV subtracts from `d`) and is drawn as `arg0 * arg2`.
+- Check: `j.combine3` (the three operand forms, the signed form and the alpha half, within 1-2 of exact).
+
 ## Textures
 
 ### `GL_EXT_paletted_texture` → `GX_TF_CI8` + TLUT

@@ -46,6 +46,7 @@ static GLubyte s_extension_string[] =
     "GL_ARB_texture_env_add "
     "GL_ARB_texture_env_combine "
     "GL_ARB_vertex_buffer_object "
+    "GL_ATI_texture_env_combine3 "
     "GL_EXT_texture_env_add "
     "GL_EXT_texture_env_combine "
     "GL_EXT_paletted_texture "
