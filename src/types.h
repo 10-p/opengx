@@ -52,7 +52,7 @@ typedef enum {
 
 /* Now we support as much as 255 VBOs, but, should we support more, we'll need
  * to use a larger type for the index. */
-typedef uint8_t VboType;
+typedef uint16_t VboType;
 
 typedef uint8_t FboType;
 

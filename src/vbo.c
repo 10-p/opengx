@@ -31,6 +31,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include "debug.h"
 #include "state.h"
+#include "texture.h"
 #include "utils.h"
 
 #include <malloc.h>
@@ -41,6 +42,8 @@ struct _VertexBuffer {
     size_t size;
     unsigned mapped : 1;
     uint16_t last_sync_token_sent;
+    /* The swap count of that token (tokens restart from 0 at every swap) */
+    uint32_t last_sync_swap;
     VertexBuffer *next_unbound;
 
     /* The buffer data are stored in the same memory block at the end of this
@@ -48,8 +51,7 @@ struct _VertexBuffer {
     _Alignas(4) uint8_t data[0];
 };
 
-#define MAX_VBOS 256 /* Check the size of _ogx_state.bound_vbo_* members if
-                        increasing this! */
+#define MAX_VBOS 4096 /* VboType (types.h) must be able to hold MAX_VBOS */
 
 static VertexBuffer *s_buffers[MAX_VBOS];
 /* List of unbound buffers; we can free them once their sync token has been
@@ -100,7 +102,8 @@ static void check_releasable_unbound_buffers(bool delete_all)
     while (buffer) {
         VertexBuffer *next = buffer->next_unbound;
         if (delete_all ||
-            _ogx_draw_sync_token_received >= buffer->last_sync_token_sent) {
+            _ogx_fifo_point_passed(buffer->last_sync_swap,
+                                   buffer->last_sync_token_sent)) {
             /* Buffer is done, we can release it */
             free(buffer);
             *prev_ptr = next;
@@ -185,7 +188,8 @@ static void set_buffer_data(GLenum target, GLintptr offset, GLsizeiptr size,
             check_releasable_unbound_buffers(false);
 
         if (buffer && buffer != RESERVED_PTR) {
-            if (buffer->last_sync_token_sent > _ogx_draw_sync_token_received) {
+            if (!_ogx_fifo_point_passed(buffer->last_sync_swap,
+                                        buffer->last_sync_token_sent)) {
                 /* Buffer is still in use by the GPU, we can't free it right
                  * now */
                 move_to_unbound_list(buffer);
@@ -213,8 +217,15 @@ static void set_buffer_data(GLenum target, GLintptr offset, GLsizeiptr size,
     }
     if (data) {
         if (buffer->last_sync_token_sent != 0) {
-            /* We must wait for the draw operation to complete */
-            while (GX_GetDrawSync() < buffer->last_sync_token_sent);
+            /* We must wait for the draw operation to complete. The token is
+             * of the swap it was sent in: comparing it with the GPU's
+             * current token alone hangs once a swap has restarted them. */
+            if (!_ogx_fifo_point_passed(buffer->last_sync_swap,
+                                        buffer->last_sync_token_sent)) {
+                GX_Flush();
+                while (!_ogx_fifo_point_passed(buffer->last_sync_swap,
+                                               buffer->last_sync_token_sent));
+            }
             buffer->last_sync_token_sent = 0;
         }
         memcpy(buffer->data + offset, data, size);
@@ -325,6 +336,7 @@ void _ogx_vbo_set_in_use(VboType vbo)
 {
     int index = vbo - 1;
     if (!VBO_IS_USED(index)) return;
+    s_buffers[index]->last_sync_swap = _ogx_swaps_sent();
     s_buffers[index]->last_sync_token_sent = send_draw_sync_token();
 }
 

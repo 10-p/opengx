@@ -106,6 +106,11 @@ extern GLenum _ogx_texture_compression_hint;
 void _ogx_free_after_gpu(void *ptr);
 /* Hooks for the frame boundary (draw sync tokens restart from 0 there) */
 void _ogx_texture_swap_marker_sent(void);
+/* A point of the FIFO is (swap markers sent before it, draw sync token):
+ * tokens restart from 0 at every swap. The current swap count, and whether
+ * the GPU has passed a point. */
+uint32_t _ogx_swaps_sent(void);
+bool _ogx_fifo_point_passed(uint32_t swap, uint16_t token);
 void _ogx_texture_swap_marker_received(void);
 extern uint32_t _ogx_texture_orphans; /* statistics, for tests */
 /* Byte offset of a mipmap level in the texel buffer, and size of a level,

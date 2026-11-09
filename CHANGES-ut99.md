@@ -35,6 +35,21 @@ sent upstream on its own. Licence unchanged (BSD-3-Clause, see the file headers)
   (`arg0 * arg2 - arg1`) has no one-stage form (the TEV subtracts from `d`) and is drawn as `arg0 * arg2`.
 - Check: `j.combine3` (the three operand forms, the signed form and the alpha half, within 1-2 of exact).
 
+## Buffer objects
+
+### Rewriting a buffer drawn before the last swap no longer hangs; 4096 buffer names
+- **Upstream bug (hang):** `glBufferData`/`glBufferSubData` with data into a buffer that had been drawn waited
+  with `while (GX_GetDrawSync() < last_sync_token_sent)`. Draw sync tokens restart from 0 at every
+  `ogx_prepare_swap_buffers()`, so a buffer drawn late in one frame (token 200, say) and rewritten in the next,
+  whose draws had sent fewer tokens, waited forever. UC2GLDrv's dynamic vertex pool hung in its second frame.
+  The buffer now keeps the swap count of its token and the wait is for that FIFO point
+  (`_ogx_fifo_point_passed()`, shared with the deferred texture frees); the FIFO is flushed before waiting so
+  the token reaches the GPU. The "can this storage be freed now" checks use the same test.
+- **`MAX_VBOS` 256 → 4096** (`VboType` is 16 bits): a UE2 level has a vertex buffer per static mesh, BSP section
+  and skeletal mesh, far more than 256. The name table is 16 KB.
+- Check: `k.vbo` (1500 buffers drawn at once, each its own colour; a buffer drawn after 200 tokens, rewritten
+  after a swap: no hang, the new data, 0.03 ms).
+
 ## Textures
 
 ### `GL_EXT_paletted_texture` → `GX_TF_CI8` + TLUT

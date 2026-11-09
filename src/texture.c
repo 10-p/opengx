@@ -164,12 +164,16 @@ void _ogx_texture_swap_marker_sent(void) { s_swaps_sent++; }
 /* Called from the draw sync interrupt */
 void _ogx_texture_swap_marker_received(void) { s_swaps_received++; }
 
-static bool fifo_point_passed(uint32_t swap, uint16_t token)
+uint32_t _ogx_swaps_sent(void) { return s_swaps_sent; }
+
+bool _ogx_fifo_point_passed(uint32_t swap, uint16_t token)
 {
     uint32_t received = s_swaps_received;
     if (received > swap) return true;
-    return received == swap && _ogx_draw_sync_token_received >= token;
+    return received == swap &&
+        *(volatile uint16_t *)&_ogx_draw_sync_token_received >= token;
 }
+#define fifo_point_passed _ogx_fifo_point_passed
 
 static void reap_deferred(void)
 {
