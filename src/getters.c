@@ -134,6 +134,10 @@ GLboolean glIsEnabled(GLenum cap)
     case GL_LIGHT1:
     case GL_LIGHT2:
     case GL_LIGHT3:
+    case GL_LIGHT4:
+    case GL_LIGHT5:
+    case GL_LIGHT6:
+    case GL_LIGHT7:
         return glparamstate.lighting.lights[cap - GL_LIGHT0].enabled;
     case GL_LIGHTING:
         return glparamstate.lighting.enabled;

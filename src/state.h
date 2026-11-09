@@ -51,7 +51,7 @@ extern "C" {
 #define MAX_MODV_STACK 16  // Modelview matrix stack depth
 #define MAX_TEXTURE_MAT_STACK 2 // Matrix stack, 2 is the required minimum
 #define NUM_VERTS_IM   64  // Maximum number of vertices that can be inside a glBegin/End
-#define MAX_LIGHTS     4   // Max num lights
+#define MAX_LIGHTS     8   // Max num lights (the GL minimum)
 #define MAX_GX_LIGHTS  8
 #define MAX_NAME_STACK_DEPTH 256 /* 64 is the minimum required */
 /* A TEV stage can process up to 2 clip planes, so we could increase this if
@@ -303,7 +303,7 @@ typedef struct glparams_
             int8_t gx_diffuse;
             int8_t gx_specular;
         } lights[MAX_LIGHTS];
-        GXLightObj lightobj[MAX_LIGHTS * 2];
+        GXLightObj lightobj[MAX_GX_LIGHTS];
         float globalambient[4];
         float matambient[4];
         float matdiffuse[4];

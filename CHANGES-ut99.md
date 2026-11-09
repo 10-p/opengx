@@ -173,12 +173,17 @@ triangles, 5112 vertices of 44 bytes: position, normal, RGBA8 colour, two textur
   lights' own ambient and the specular term (GX has two colour channels).
 - Check: `l.emission` (emission + global ambient + one directional light, and with the light off; within 2).
 
-### Light numbers beyond the four opengx has
-- **Upstream bug (memory):** `glLightf`/`glLightfv` indexed the light table with `light - GL_LIGHT0` unchecked;
-  opengx has 4 lights (two GX lights each), so `GL_LIGHT4..7` (valid enums, which a D3D-style device with 8
-  lights sets at start-up) wrote past the table into the GX light objects. They now give `GL_INVALID_ENUM`, and
-  `glGetIntegerv(GL_MAX_LIGHTS)` answers 4 (it answered nothing).
-- Check: `l.emission` (GL_MAX_LIGHTS, GL_LIGHT5/GL_LIGHT7 rejected).
+### Eight lights
+- **Upstream bug (memory):** `glLightf`/`glLightfv` indexed the light table with `light - GL_LIGHT0` unchecked,
+  so `GL_LIGHT4..7` wrote past the 4-entry table into the GX light objects.
+- OpenGL requires at least 8 lights, and a D3D-style device (UT2004's OpenGLDrv) sets and enables all 8 every
+  frame. The table now has 8 GL lights; GX's 8 hardware lights are given out per draw to the colour terms each
+  light needs (one for a light with only a diffuse colour, the usual case; up to three with ambient and
+  specular), first come first served; what does not fit is left out (warning). `GL_LIGHT0 + 8` and beyond give
+  `GL_INVALID_ENUM`, `glGetIntegerv(GL_MAX_LIGHTS)` answers 8, `glEnable/glDisable/glIsEnabled` take
+  `GL_LIGHT4..7`.
+- Check: `l.emission` (GL_MAX_LIGHTS, lights 8 and 9 rejected), `p.lighting` (eight lights of 0.1 add up to
+  0.8, `GL_LIGHT7` alone).
 
 ## Texture coordinates
 

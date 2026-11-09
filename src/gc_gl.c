@@ -698,6 +698,10 @@ void glEnable(GLenum cap)
     case GL_LIGHT1:
     case GL_LIGHT2:
     case GL_LIGHT3:
+    case GL_LIGHT4:
+    case GL_LIGHT5:
+    case GL_LIGHT6:
+    case GL_LIGHT7:
         glparamstate.lighting.lights[cap - GL_LIGHT0].enabled = 1;
         glparamstate.dirty.bits.dirty_tev = 1;
         break;
@@ -778,6 +782,10 @@ void glDisable(GLenum cap)
     case GL_LIGHT1:
     case GL_LIGHT2:
     case GL_LIGHT3:
+    case GL_LIGHT4:
+    case GL_LIGHT5:
+    case GL_LIGHT6:
+    case GL_LIGHT7:
         glparamstate.lighting.lights[cap - GL_LIGHT0].enabled = 0;
         glparamstate.dirty.bits.dirty_tev = 1;
         break;
