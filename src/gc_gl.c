@@ -2808,9 +2808,17 @@ void glDrawArrays(GLenum mode, GLint first, GLsizei count)
 
     _ogx_gpu_resources_push();
 
+    /* glBegin()/glEnd() vertices stay direct: they are sent once, a copy
+     * would cost as much as sending them */
+    if (indexed_arrays_possible() && !glparamstate.imm_mode.in_gl_begin)
+        _ogx_arrays_plan_arrays(gxmode.mode, gxmode.loop, first, count);
+
     bool should_draw = setup_draw(&draw_data);
     if (should_draw) {
-        draw_arrays_general(&draw_data);
+        if (_ogx_arrays_indexed_planned())
+            _ogx_arrays_draw_indexed_arrays(&draw_data);
+        else
+            draw_arrays_general(&draw_data);
         glparamstate.draw_count++;
     }
     draw_done();
@@ -2861,10 +2869,8 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
                                        indices);
     }
     if (indexed_arrays_possible()) {
-        int min, max;
-        _ogx_arrays_index_range(index_data, type, count, &min, &max);
-        if (min >= 0 && max >= 0)
-            _ogx_arrays_plan_indexed(min, max, count + gxmode.loop);
+        _ogx_arrays_plan_elements(gxmode.mode, gxmode.loop, count, type,
+                                  index_data);
     }
 
     bool should_draw = setup_draw(&draw_data);

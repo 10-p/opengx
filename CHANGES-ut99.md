@@ -88,6 +88,24 @@ triangles, 5112 vertices of 44 bytes: position, normal, RGBA8 colour, two textur
   buffer objects, glDrawArrays, immediate mode, line loops: every path gives the same pixels). The whole suite's
   checked pixels and read-back regions (an FNV checksum of each) are identical to the build before.
 
+### Indexed GX arrays for `glDrawArrays`; large draws in chunks
+- `glDrawArrays` goes through the same path with the ascending indices `first..first+count-1` (rebased to 0):
+  GX has no non-indexed array draw, and the 16-bit indices cost less than the attribute values. It beats the
+  direct path down to a single 4-vertex fan (1000 one-quad draws: 3.06 -> 2.92 ms; the classification of the
+  arrays into indexed/direct/copy groups is cached until the arrays change). Immediate mode (`glBegin`/`glEnd`)
+  stays direct: its vertices are sent once anyway.
+- A draw whose copies exceed 256 KB is split into chunks of whole primitives (points, lines, triangles, quads),
+  each copied into the ring and drawn on its own (`GX_SetArray` per chunk). A chunk whose indices span much more
+  than its vertex count is sent directly (vertex descriptor switched for that chunk only). Strips and fans that
+  large stay on the direct path.
+- **Upstream bug (hang):** a draw of more than 65535 vertices wrapped `GX_Begin()`'s 16-bit vertex count and the
+  GP desynchronised (the feature test hung). List primitives are now always drawn in chunks of at most 65534.
+- Bench (ms submit per frame, before -> after): de-indexed mesh (29820 vertices), client arrays one draw 11.86 ->
+  3.11, 100 draws 11.95 -> 3.20; static buffer objects one draw 6.25 -> 1.32, 100 draws 6.41 -> 1.57; the older
+  "10000 tris" lines: glDrawArrays 9.05 -> 2.32, glDrawElements 9.40 -> 2.98, 50 calls 8.62 -> 2.22.
+- Check: `o.indexed` "large" checks: 86400 indices in one draw (chunked) and with rows from both ends in turn
+  (first chunks drawn directly), and glDrawArrays of 86400 vertices, each the same pixels as one draw per row.
+
 ## Lighting
 
 ### `GL_COLOR_MATERIAL` with `GL_EMISSION` and a colour array

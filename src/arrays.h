@@ -71,12 +71,19 @@ void _ogx_array_reader_read_color(OgxArrayReader *reader,
 
 void _ogx_arrays_reset(void);
 
-/* Indexed GX arrays for the next draw of the current readers, whose array
- * indices are in [min, max]: the client data the draw needs is copied for
- * the GPU. False if the draw must use the direct path. The plan is used by
- * the next _ogx_arrays_setup_draw(OGX_DRAW_FLAG_NONE) and dropped by
+/* Indexed GX arrays for the next draw of the current readers: count
+ * vertices (with a loop's closing one) in gxmode, whose array indices are in
+ * [min, max]. The client data the draw needs is copied for the GPU (large
+ * draws of list primitives chunk by chunk while drawing). False if the draw
+ * must use the direct path. The plan is used by the next
+ * _ogx_arrays_setup_draw(OGX_DRAW_FLAG_NONE) and dropped by
  * _ogx_arrays_draw_done(). */
-bool _ogx_arrays_plan_indexed(int min, int max, int count);
+bool _ogx_arrays_plan_indexed(uint8_t gxmode, int min, int max, int count);
+/* _ogx_arrays_plan_indexed() for glDrawElements (indices: CPU address of
+ * the index data) and glDrawArrays */
+bool _ogx_arrays_plan_elements(uint8_t gxmode, bool loop, int count,
+                               GLenum type, const void *indices);
+bool _ogx_arrays_plan_arrays(uint8_t gxmode, bool loop, int first, int count);
 bool _ogx_arrays_indexed_planned(void);
 void _ogx_arrays_draw_indexed_elements(const OgxDrawData *draw_data,
                                        const void *indices);

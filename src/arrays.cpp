@@ -770,136 +770,214 @@ enum IndexedMode : uint8_t {
     IDX_INDEX,  /* an index into the array set up for this draw */
 };
 
+/* A draw whose copies exceed this is split into chunks of list primitives,
+ * each copied and drawn on its own */
+#define CHUNK_BYTES (256 * 1024)
+
+/* Client arrays copied together: the attributes of one interleaved vertex
+ * (same stride, all within one stride of each other) */
+struct CopyGroup {
+    const char *lo, *hi; /* first and one past the last byte of element 0 */
+    uint16_t stride;
+};
+
 static struct {
+    bool classified; /* the fields up to group[] describe the readers */
     bool active;
     bool all_indexed;
+    bool chunked;
     uint8_t index_size; /* 1: GX_INDEX8, 2: GX_INDEX16 */
     uint8_t num_indexed;
-    int min;
+    uint8_t num_groups;
+    uint8_t prim_vertices; /* vertices per primitive of a chunkable mode */
+    int min;               /* the index the current arrays start at */
+    uint32_t copy_bytes_per_vertex;
     IndexedMode mode[MAX_READERS];
+    GxSourceKind kind[MAX_READERS];
+    GxSource src[MAX_READERS];
+    int8_t group_of[MAX_READERS];
+    CopyGroup group[MAX_READERS];
     const void *base[MAX_READERS];
     uint8_t stride[MAX_READERS];
 } s_plan;
 
-/* Copies [start, end) of every group of overlapping client arrays (the
- * attributes of an interleaved vertex share one copy). */
-struct CopyGroup {
-    const char *start, *end;
-    uint16_t stride;
-    uint8_t *copy;
-};
-
-bool _ogx_arrays_plan_indexed(int min, int max, int count)
+static int vertices_per_primitive(uint8_t gxmode)
 {
-    s_plan.active = false;
-    if (count <= 0 || count >= 65535) return false; /* GX_Begin's u16 count */
-    int range = max - min + 1;
-    if (min < 0 || range > 65535) return false;
+    switch (gxmode) {
+    case GX_POINTS: return 1;
+    case GX_LINES: return 2;
+    case GX_TRIANGLES: return 3;
+    case GX_QUADS: return 4;
+    default: return 0; /* strips, fans: not split */
+    }
+}
 
+/* Points the indexed attributes at the vertices [min, max], copying the
+ * client data */
+static bool copy_range(int min, int max)
+{
+    const int n = count_attributes();
+    const int range = max - min + 1;
+    uint8_t *copy[MAX_READERS];
+    for (int g = 0; g < s_plan.num_groups; g++) {
+        const CopyGroup &grp = s_plan.group[g];
+        const char *start = grp.lo + min * grp.stride;
+        uint32_t size = (grp.hi - grp.lo) + (range - 1) * grp.stride;
+        copy[g] = ring_alloc(size);
+        if (!copy[g]) return false;
+        memcpy(copy[g], start, size);
+        DCStoreRangeNoSync(copy[g], size);
+    }
+    for (int i = 0; i < n; i++) {
+        const GxSource &src = s_plan.src[i];
+        switch (s_plan.kind[i]) {
+        case GXS_GPU:
+            s_plan.base[i] = src.data + min * src.stride;
+            break;
+        case GXS_RAW: {
+            const CopyGroup &grp = s_plan.group[s_plan.group_of[i]];
+            s_plan.base[i] = copy[s_plan.group_of[i]] + (src.data - grp.lo);
+            break;
+        }
+        case GXS_COLOR_FLOAT: {
+            int nc = src.num_components;
+            int j;
+            /* CLR1 repeats CLR0's array when lighting */
+            for (j = 0; j < i; j++) {
+                const GxSource &o = s_plan.src[j];
+                if (s_plan.kind[j] == GXS_COLOR_FLOAT && o.data == src.data &&
+                    o.stride == src.stride && o.num_components == nc) break;
+            }
+            if (j < i) {
+                s_plan.base[i] = s_plan.base[j];
+                break;
+            }
+            uint8_t *out = ring_alloc(range * nc);
+            if (!out) return false;
+            const char *in = src.data + min * src.stride;
+            for (int v = 0; v < range; v++, in += src.stride)
+                ColorVertexReader<float>::convert(
+                    reinterpret_cast<const float*>(in), nc, out + v * nc);
+            DCStoreRangeNoSync(out, range * nc);
+            s_plan.base[i] = out;
+            break;
+        }
+        default:
+            break;
+        }
+    }
+    /* The copies must reach memory before the GPU reads them */
+    ppcsync();
+    s_plan.min = min;
+    return true;
+}
+
+/* Sorts the current readers into indexed and direct attributes and groups
+ * the client arrays copied together. The result holds until the readers are
+ * rebuilt (_ogx_arrays_reset()). */
+static void classify_sources()
+{
     int n = count_attributes();
-    GxSource src[MAX_READERS];
-    GxSourceKind kind[MAX_READERS];
     int num_indexed = 0, num_direct = 0;
-    bool needs_copy = false;
+    uint32_t bytes_per_vertex = 0;
+    s_plan.num_groups = 0;
     for (int i = 0; i < n; i++) {
-        kind[i] = get_reader(&s_readers[i])->gx_source(&src[i]);
-        if (kind[i] == GXS_DIRECT) num_direct++;
-        else if (kind[i] != GXS_NONE) num_indexed++;
-        if (kind[i] == GXS_RAW || kind[i] == GXS_COLOR_FLOAT) needs_copy = true;
-    }
-    if (num_indexed == 0) return false;
-    /* A copy is worth it while the range is not much larger than the
-     * vertices drawn */
-    if (needs_copy && range > 2 * count + 64) return false;
-
-    CopyGroup groups[MAX_READERS];
-    int num_groups = 0;
-    int group_of[MAX_READERS];
-    for (int i = 0; i < n; i++) {
-        group_of[i] = -1;
-        if (kind[i] != GXS_RAW) continue;
-        const char *start = src[i].data + min * src[i].stride;
-        const char *end = src[i].data + max * src[i].stride + src[i].elem_bytes;
-        int g;
-        for (g = 0; g < num_groups; g++) {
-            if (groups[g].stride == src[i].stride &&
-                start < groups[g].end && groups[g].start < end) break;
-        }
-        if (g == num_groups) {
-            groups[g].start = start;
-            groups[g].end = end;
-            groups[g].stride = src[i].stride;
-            num_groups++;
-        } else {
-            if (start < groups[g].start) groups[g].start = start;
-            if (end > groups[g].end) groups[g].end = end;
-        }
-        group_of[i] = g;
-    }
-    for (int g = 0; g < num_groups; g++) {
-        uint32_t size = groups[g].end - groups[g].start;
-        groups[g].copy = ring_alloc(size);
-        if (!groups[g].copy) return false;
-        memcpy(groups[g].copy, groups[g].start, size);
-        DCStoreRangeNoSync(groups[g].copy, size);
-    }
-
-    for (int i = 0; i < n; i++) {
-        switch (kind[i]) {
+        GxSource &src = s_plan.src[i];
+        GxSourceKind kind = get_reader(&s_readers[i])->gx_source(&src);
+        s_plan.kind[i] = kind;
+        s_plan.group_of[i] = -1;
+        switch (kind) {
         case GXS_DIRECT:
             s_plan.mode[i] = IDX_DIRECT;
+            num_direct++;
             continue;
         case GXS_NONE:
             s_plan.mode[i] = IDX_NONE;
             continue;
         case GXS_GPU:
-            s_plan.base[i] = src[i].data + min * src[i].stride;
-            s_plan.stride[i] = src[i].stride;
+            s_plan.stride[i] = src.stride;
             break;
         case GXS_RAW: {
-            const CopyGroup &grp = groups[group_of[i]];
-            s_plan.base[i] = grp.copy +
-                (src[i].data + min * src[i].stride - grp.start);
-            s_plan.stride[i] = src[i].stride;
+            const char *lo = src.data, *hi = src.data + src.elem_bytes;
+            int g;
+            for (g = 0; g < s_plan.num_groups; g++) {
+                CopyGroup &grp = s_plan.group[g];
+                if (grp.stride != src.stride) continue;
+                const char *glo = lo < grp.lo ? lo : grp.lo;
+                const char *ghi = hi > grp.hi ? hi : grp.hi;
+                if (ghi - glo <= src.stride) {
+                    grp.lo = glo;
+                    grp.hi = ghi;
+                    break;
+                }
+            }
+            if (g == s_plan.num_groups) {
+                s_plan.group[g] = { lo, hi, src.stride };
+                s_plan.num_groups++;
+            }
+            s_plan.group_of[i] = g;
+            s_plan.stride[i] = src.stride;
             break;
         }
-        case GXS_COLOR_FLOAT: {
-            int nc = src[i].num_components;
-            int j;
-            /* CLR1 repeats CLR0's array when lighting */
-            for (j = 0; j < i; j++) {
-                if (kind[j] == GXS_COLOR_FLOAT && src[j].data == src[i].data &&
-                    src[j].stride == src[i].stride &&
-                    src[j].num_components == nc) break;
-            }
-            if (j < i) {
-                s_plan.base[i] = s_plan.base[j];
-            } else {
-                uint8_t *out = ring_alloc(range * nc);
-                if (!out) return false;
-                const char *in = src[i].data + min * src[i].stride;
-                for (int v = 0; v < range; v++, in += src[i].stride)
-                    ColorVertexReader<float>::convert(
-                        reinterpret_cast<const float*>(in), nc, out + v * nc);
-                DCStoreRangeNoSync(out, range * nc);
-                s_plan.base[i] = out;
-            }
-            s_plan.stride[i] = nc;
+        case GXS_COLOR_FLOAT:
+            s_plan.stride[i] = src.num_components;
+            bytes_per_vertex += src.num_components;
             break;
-        }
         }
         s_plan.mode[i] = IDX_INDEX;
+        num_indexed++;
     }
-
-    s_plan.min = min;
+    for (int g = 0; g < s_plan.num_groups; g++)
+        bytes_per_vertex += s_plan.group[g].stride;
     s_plan.num_indexed = num_indexed;
     s_plan.all_indexed = num_direct == 0;
-    s_plan.index_size = range <= 255 ? 1 : 2;
+    s_plan.copy_bytes_per_vertex = bytes_per_vertex;
+    s_plan.classified = true;
+}
+
+bool _ogx_arrays_plan_indexed(uint8_t gxmode, int min, int max, int count)
+{
+    s_plan.active = false;
+    if (count <= 0) return false;
+    int range = max - min + 1;
+    if (min < 0 || max < min) return false;
+
+    if (!s_plan.classified) classify_sources();
+    if (s_plan.num_indexed == 0) return false;
+    uint32_t bytes_per_vertex = s_plan.copy_bytes_per_vertex;
+
+    /* A copy is worth it while the range is not much larger than the
+     * vertices drawn */
+    if (bytes_per_vertex && range > 2 * count + 64) return false;
+
+    s_plan.prim_vertices = vertices_per_primitive(gxmode);
+    if (range <= 65534 && count <= 65534 &&
+        uint64_t(range) * bytes_per_vertex <= CHUNK_BYTES) {
+        if (!copy_range(min, max)) return false;
+        s_plan.chunked = false;
+        s_plan.index_size = range <= 255 ? 1 : 2;
+    } else {
+        /* Only list primitives are split; the caller's loop vertex is a
+         * line strip's */
+        if (s_plan.prim_vertices == 0) return false;
+        s_plan.chunked = true;
+        s_plan.index_size = 2;
+    }
     s_plan.active = true;
     return true;
 }
 
-static void setup_indexed_draw()
+static void set_indexed_arrays()
+{
+    int n = count_attributes();
+    for (int i = 0; i < n; i++) {
+        if (s_plan.mode[i] != IDX_INDEX) continue;
+        GX_SetArray(get_reader(&s_readers[i])->gx_format().attribute,
+                    const_cast<void*>(s_plan.base[i]), s_plan.stride[i]);
+    }
+}
+
+static void set_indexed_descriptors()
 {
     int n = count_attributes();
     uint8_t input = s_plan.index_size == 1 ? GX_INDEX8 : GX_INDEX16;
@@ -910,27 +988,27 @@ static void setup_indexed_draw()
             continue;
         }
         const GxVertexFormat &f = r->gx_format();
-        GX_SetArray(f.attribute, const_cast<void*>(s_plan.base[i]),
-                    s_plan.stride[i]);
         GX_SetVtxDesc(f.attribute, input);
         GX_SetVtxAttrFmt(GX_VTXFMT0, f.attribute, f.type, f.size, 0);
     }
-    /* The copies (and buffer object uploads) must reach memory before the
-     * GPU reads them */
-    ppcsync();
 }
 
-/* Sends the vertices count (+ the first again for a loop): index_of(i) is
- * the array index of the i-th vertex. */
+static void setup_indexed_draw()
+{
+    set_indexed_descriptors();
+    if (!s_plan.chunked) set_indexed_arrays();
+}
+
+/* Sends the vertices [from, to) (vertex count for the loop: the first vertex
+ * again after the last): index_of(i) is the array index of the i-th one. */
 template <typename F>
-static inline void emit_indexed(int count, bool loop, F index_of)
+static inline void emit_indexed(int from, int to, int count, F index_of)
 {
     const int min = s_plan.min;
-    const int total = count + loop;
     if (s_plan.all_indexed) {
         const int n = s_plan.num_indexed;
         if (s_plan.index_size == 1) {
-            for (int i = 0; i < total; i++) {
+            for (int i = from; i < to; i++) {
                 uint32_t v = index_of(i < count ? i : 0) - min;
                 uint32_t rep = v * 0x01010101u;
                 int k = n;
@@ -939,7 +1017,7 @@ static inline void emit_indexed(int count, bool loop, F index_of)
                 if (k) wgPipe->U8 = v;
             }
         } else {
-            for (int i = 0; i < total; i++) {
+            for (int i = from; i < to; i++) {
                 uint32_t v = index_of(i < count ? i : 0) - min;
                 uint32_t rep = v | (v << 16);
                 int k = n;
@@ -951,7 +1029,7 @@ static inline void emit_indexed(int count, bool loop, F index_of)
     }
 
     const int n = count_attributes();
-    for (int i = 0; i < total; i++) {
+    for (int i = from; i < to; i++) {
         int index = index_of(i < count ? i : 0);
         uint32_t v = index - min;
         for (int a = 0; a < n; a++) {
@@ -970,6 +1048,96 @@ static inline void emit_indexed(int count, bool loop, F index_of)
     }
 }
 
+/* Vertices per chunk of a split draw: whole primitives, within the copy
+ * budget and the GX index range */
+static int chunk_vertices()
+{
+    int bpv = s_plan.copy_bytes_per_vertex;
+    int v = bpv ? CHUNK_BYTES / bpv : 65534;
+    if (v > 65534) v = 65534;
+    v -= v % s_plan.prim_vertices;
+    return v > 0 ? v : s_plan.prim_vertices;
+}
+
+template <typename F>
+static void draw_chunk_direct(uint8_t mode, int from, int to, F index_of)
+{
+    int n = count_attributes();
+    for (int i = 0; i < n; i++) get_reader(&s_readers[i])->setup_draw();
+    GX_InvVtxCache();
+    GX_Begin(mode, GX_VTXFMT0, to - from);
+    for (int i = from; i < to; i++) {
+        int index = index_of(i);
+        for (int a = 0; a < n; a++)
+            get_reader(&s_readers[a])->process_element(index);
+    }
+    GX_End();
+    set_indexed_descriptors();
+}
+
+template <typename F>
+static void draw_indexed(const OgxDrawData *draw_data, F index_of,
+                         bool ascending)
+{
+    const uint8_t mode = draw_data->gxmode.mode;
+    const int count = draw_data->count;
+    if (!s_plan.chunked) {
+        const int total = count + draw_data->gxmode.loop;
+        GX_InvVtxCache();
+        GX_Begin(mode, GX_VTXFMT0, total);
+        emit_indexed(0, total, count, index_of);
+        GX_End();
+        return;
+    }
+
+    const int per = chunk_vertices();
+    for (int from = 0; from < count; from += per) {
+        int to = from + per < count ? from + per : count;
+        to -= (to - from) % s_plan.prim_vertices;
+        if (to <= from) break;
+        int lo, hi;
+        if (ascending) {
+            lo = index_of(from);
+            hi = index_of(to - 1);
+        } else {
+            lo = 0x7fffffff; hi = -1;
+            for (int i = from; i < to; i++) {
+                int v = index_of(i);
+                if (v < lo) lo = v;
+                if (v > hi) hi = v;
+            }
+        }
+        int range = hi - lo + 1;
+        if (range > 65534 || range > 2 * (to - from) + 64 ||
+            uint64_t(range) * s_plan.copy_bytes_per_vertex > RING_SIZE / 2 ||
+            !copy_range(lo, hi)) {
+            draw_chunk_direct(mode, from, to, index_of);
+            continue;
+        }
+        set_indexed_arrays();
+        GX_InvVtxCache();
+        GX_Begin(mode, GX_VTXFMT0, to - from);
+        emit_indexed(from, to, count, index_of);
+        GX_End();
+    }
+}
+
+bool _ogx_arrays_plan_elements(uint8_t gxmode, bool loop, int count,
+                               GLenum type, const void *indices)
+{
+    int min, max;
+    _ogx_arrays_index_range(indices, type, count, &min, &max);
+    if (min < 0 || max < 0) return false;
+    return _ogx_arrays_plan_indexed(gxmode, min, max, count + loop);
+}
+
+bool _ogx_arrays_plan_arrays(uint8_t gxmode, bool loop, int first, int count)
+{
+    if (first < 0 || count <= 0) return false;
+    return _ogx_arrays_plan_indexed(gxmode, first, first + count - 1,
+                                    count + loop);
+}
+
 bool _ogx_arrays_indexed_planned()
 {
     return s_plan.active;
@@ -978,38 +1146,29 @@ bool _ogx_arrays_indexed_planned()
 void _ogx_arrays_draw_indexed_elements(const OgxDrawData *draw_data,
                                        const void *indices)
 {
-    bool loop = draw_data->gxmode.loop;
-    int count = draw_data->count;
-    GX_InvVtxCache();
-    GX_Begin(draw_data->gxmode.mode, GX_VTXFMT0, count + loop);
     switch (draw_data->type) {
     case GL_UNSIGNED_BYTE: {
         const uint8_t *idx = static_cast<const uint8_t*>(indices);
-        emit_indexed(count, loop, [idx](int i) { return int(idx[i]); });
+        draw_indexed(draw_data, [idx](int i) { return int(idx[i]); }, false);
         break;
     }
     case GL_UNSIGNED_SHORT: {
         const uint16_t *idx = static_cast<const uint16_t*>(indices);
-        emit_indexed(count, loop, [idx](int i) { return int(idx[i]); });
+        draw_indexed(draw_data, [idx](int i) { return int(idx[i]); }, false);
         break;
     }
     case GL_UNSIGNED_INT: {
         const uint32_t *idx = static_cast<const uint32_t*>(indices);
-        emit_indexed(count, loop, [idx](int i) { return int(idx[i]); });
+        draw_indexed(draw_data, [idx](int i) { return int(idx[i]); }, false);
         break;
     }
     }
-    GX_End();
 }
 
 void _ogx_arrays_draw_indexed_arrays(const OgxDrawData *draw_data)
 {
-    bool loop = draw_data->gxmode.loop;
-    int count = draw_data->count, first = draw_data->first;
-    GX_InvVtxCache();
-    GX_Begin(draw_data->gxmode.mode, GX_VTXFMT0, count + loop);
-    emit_indexed(count, loop, [first](int i) { return first + i; });
-    GX_End();
+    int first = draw_data->first;
+    draw_indexed(draw_data, [first](int i) { return first + i; }, true);
 }
 
 void _ogx_arrays_index_range(const void *indices, GLenum type, int count,
@@ -1150,6 +1309,7 @@ static OgxArrayReader *allocate_reader_for_format(GxVertexFormat *format)
 
 void _ogx_arrays_reset()
 {
+    s_plan.classified = false;
     s_has_normals = 0;
     s_num_colors = 0;
     s_num_tex_arrays = 0;
