@@ -159,6 +159,12 @@ Level sizes: `ceil(w/tw) * ceil(h/th) * 32` bytes (`*64` for RGBA8), with `tw x 
 - 256x256 emulated: RGBA8 3.15 → 1.00 ms, 5_6_5 → RGB565 14.73 → 0.20 ms, RGB → RGB565 3.11 → 1.21 ms,
   RGBA → RGB5_A1 19.9 (corrupt) → 2.47 ms, L → I8 2.28 → 0.10 ms; 64x64 sub-image into 512x512 RGBA8 0.10 ms.
 
+### Mip levels of non-square textures
+- A level's size is `max(1, base >> level)` per axis. `glTexImage2D` derived the base size as `size << level`,
+  which is wrong once an axis has reached 1: the 1x2 tail of a 128x256 chain gave "128x512", so opengx threw the
+  texture away and rebuilt it around that tiny level (flat-coloured surfaces in UT). Now a level whose size
+  matches the existing texture's level keeps the texture; `size << level` is only used for a new base size.
+
 ## Framebuffer
 
 ### `glReadPixels`: GL orientation and a fast path

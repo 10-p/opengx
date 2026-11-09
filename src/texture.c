@@ -618,10 +618,24 @@ bool _ogx_texture_prepare_storage(GXTexObj *texobj, GLint level,
 {
     // We *may* need to delete and create a new texture, depending if the user wants to add some mipmap levels
     // or wants to create a new texture from scratch
-    int wi = calc_original_size(level, width);
-    int he = calc_original_size(level, height);
-
     texture_get_info(texobj, ti);
+
+    /* Level n of a WxH texture is max(1, W >> n) x max(1, H >> n). If the
+     * given size is that of the existing texture's level, keep its base
+     * size; only otherwise derive the base size as "size << level" (which
+     * is ambiguous once an axis has reached 1: upstream turned e.g. the 1x2
+     * tail of a 128x256 chain into a new 128x512... texture, losing all the
+     * other levels). */
+    int wi, he;
+    if (level > 0 && ti->texels &&
+        width == (ti->width >> level ? ti->width >> level : 1) &&
+        height == (ti->height >> level ? ti->height >> level : 1)) {
+        wi = ti->width;
+        he = ti->height;
+    } else {
+        wi = calc_original_size(level, width);
+        he = calc_original_size(level, height);
+    }
     uint8_t old_format = ti->format == GX_TF_A8 ? GX_TF_I8 : ti->format;
     bool is_alpha = false;
     /* GX_TF_A8 is not supported by Dolphin and it's not properly handed by
