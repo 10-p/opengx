@@ -75,3 +75,57 @@ sent upstream on its own. Licence unchanged (BSD-3-Clause, see the file headers)
 - `GL_COMPRESSED_RGB_S3TC_DXT1_EXT` must not have transparent texels: the texture is flagged `is_opaque` and
   the TEV setup reads that unit's texture alpha as a konst 1.0 (`GX_TEV_KASEL_1`) in every env mode, including
   `GL_COMBINE` sources. The colour of such texels is still `(c0+c1)/2`, not black (GX limitation).
+
+### `GL_OGX_native_texture`: pre-tiled GX texture data, zero conversion
+Header: `#include <GL/gxext.h>` (installed next to `GL/gl.h`). The enums are above 0xFFFF, a range Khronos
+never assigns; the low 4 bits are the `GX_TF_*` value.
+
+| Internal format (`glCompressedTexImage2D`) | value | GX format |
+|---|---|---|
+| `GL_TEXTURE_GX_I8_OGX` | `0x0F6E0001` | `GX_TF_I8` |
+| `GL_TEXTURE_GX_IA8_OGX` | `0x0F6E0003` | `GX_TF_IA8` |
+| `GL_TEXTURE_GX_RGB565_OGX` | `0x0F6E0004` | `GX_TF_RGB565` |
+| `GL_TEXTURE_GX_RGB5A3_OGX` | `0x0F6E0005` | `GX_TF_RGB5A3` |
+| `GL_TEXTURE_GX_RGBA8_OGX` | `0x0F6E0006` | `GX_TF_RGBA8` |
+| `GL_TEXTURE_GX_CI8_OGX` | `0x0F6E0009` | `GX_TF_CI8` (palette via `glColorTableEXT`) |
+| `GL_TEXTURE_GX_CMPR_OGX` | `0x0F6E000E` | `GX_TF_CMPR` |
+
+| `glColorTableEXT` type | value | table contents |
+|---|---|---|
+| `GL_TLUT_GX_IA8_OGX` | `0x0F6E0100` | big-endian 16-bit entries, `A<<8 \| I` |
+| `GL_TLUT_GX_RGB565_OGX` | `0x0F6E0101` | big-endian 16-bit RGB565 entries |
+| `GL_TLUT_GX_RGB5A3_OGX` | `0x0F6E0102` | big-endian 16-bit RGB5A3 entries |
+
+With a `GL_TLUT_GX_*_OGX` type the `format` argument is ignored and the TLUT format is the type's; the
+internal format is only recorded. The entries are copied as they are.
+
+**Upload:** `glCompressedTexImage2D(GL_TEXTURE_2D, level, GL_TEXTURE_GX_xxx_OGX, w, h, 0, imageSize, data)`:
+opengx allocates (or reuses) the 32-byte-aligned GX buffer, `memcpy`s, `DCFlushRange`s, and sets up the
+`GXTexObj`. No conversion at all. `imageSize` must be either
+- exactly the size of that level (below), or
+- for `level == 0` (and w, h ≥ 2), the size of a whole chain of n ≥ 2 levels: the whole chain is uploaded in
+  one call and the texture gets levels 0..n-1.
+
+Any other size → `GL_INVALID_VALUE`. Mipmapped textures must have power-of-two sizes (GX rule).
+
+**Byte layout** (what the PC cooker must produce; reference tilers are in
+`tests/opengx-features/main.cpp`: `gx_tile`, `gx_tile_rgba8`, `gx_tile_cmpr`):
+- The image is cut into tiles of 32 bytes (64 for RGBA8). Tiles are stored left to right, then top to bottom
+  (row 0 = top row of the image = first row of the GL data, i.e. the same row order as `glTexImage2D` data).
+  Partial tiles at the right/bottom edge are stored whole (pad with anything, zeros recommended).
+- Inside a tile, texels are in raster order (left to right, then top to bottom), except CMPR and RGBA8.
+- 16-bit values are big-endian.
+
+| Format | Tile (texels) | Texel encoding |
+|---|---|---|
+| I8 | 8x4, 1 byte/texel | intensity |
+| CI8 | 8x4, 1 byte/texel | palette index |
+| IA8 | 4x4, 2 bytes/texel | byte 0 = alpha, byte 1 = intensity |
+| RGB565 | 4x4, 2 bytes/texel | `RRRRRGGG GGGBBBBB` big-endian |
+| RGB5A3 | 4x4, 2 bytes/texel | bit 15 set: `1RRRRRGG GGGBBBBB` (opaque, 5:5:5); bit 15 clear: `0AAARRRR GGGGBBBB` (3-bit alpha, 4:4:4). GX expands a 3-bit alpha `a` to `a<<5 \| a<<2 \| a>>1` |
+| RGBA8 | 4x4, **64 bytes**: bytes 0-31 = 16 (A, R) pairs, bytes 32-63 = 16 (G, B) pairs, both in raster order in the tile | |
+| CMPR | 8x8 = 2x2 DXT1-style blocks of 8 bytes: top-left, top-right, bottom-left, bottom-right | per block: colour0 (big-endian RGB565), colour1 (big-endian RGB565), then 4 bytes, one per texel row top to bottom, each holding the 4 texels' 2-bit indices with the **leftmost texel in bits 7-6**. `colour0 > colour1`: indices 0,1 = the colours, 2 = 5/8 c0 + 3/8 c1, 3 = 3/8 c0 + 5/8 c1; otherwise 2 = (c0+c1)/2, 3 = transparent |
+
+Level sizes: `ceil(w/tw) * ceil(h/th) * 32` bytes (`*64` for RGBA8), with `tw x th` the tile size above
+(`GX_GetTexBufferSize()`, except for CI8 where libogc is wrong: CI8 is sized like I8). In a chain, level k
+(`max(w>>k,1) x max(h>>k,1)`) starts right after level k-1.

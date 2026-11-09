@@ -42,7 +42,11 @@ POSSIBILITY OF SUCH DAMAGE.
  *   puts the leftmost texel in the lowest two bits, CMPR in the highest two.
  *   The meaning of the indices (and the "c0 <= c1 means three colours plus
  *   transparent" rule) is the same.
- * DXT3 and DXT5 have no GX equivalent and are rejected. */
+ * DXT3 and DXT5 have no GX equivalent and are rejected.
+ *
+ * GL_OGX_native_texture (GL/gxext.h): the GL_TEXTURE_GX_*_OGX internal
+ * formats take data which is already in the GX layout; it's copied as is.
+ * The low 4 bits of those enums are the GX_TF_* format. */
 
 #define GL_GLEXT_PROTOTYPES 1
 #include "debug.h"
@@ -100,6 +104,77 @@ static bool is_dxt1(GLenum internal_format)
         internal_format == GL_COMPRESSED_RGBA_S3TC_DXT1_EXT;
 }
 
+static int native_gx_format(GLenum internal_format)
+{
+    switch (internal_format) {
+    case GL_TEXTURE_GX_I8_OGX:
+    case GL_TEXTURE_GX_IA8_OGX:
+    case GL_TEXTURE_GX_RGB565_OGX:
+    case GL_TEXTURE_GX_RGB5A3_OGX:
+    case GL_TEXTURE_GX_RGBA8_OGX:
+    case GL_TEXTURE_GX_CI8_OGX:
+    case GL_TEXTURE_GX_CMPR_OGX:
+        return internal_format & 0xf;
+    default:
+        return -1;
+    }
+}
+
+/* Upload pre-tiled GX data. "image_size" is either the size of the given
+ * level, or (for level 0 only) the size of a whole chain of 2 or more mipmap
+ * levels laid out as GX expects them (each level right after the previous
+ * one), which is uploaded in one go. */
+static void native_tex_image(gltexture_ *currtex, GLint level, uint8_t gx_format,
+                             int width, int height, GLsizei image_size,
+                             const void *data)
+{
+    GXTexObj *texobj = &currtex->texobj;
+    int num_levels = 0;
+    if (image_size == (GLsizei)_ogx_texture_level_size(width, height,
+                                                      gx_format)) {
+        num_levels = 1;
+    } else if (level == 0 && width >= 2 && height >= 2) {
+        for (int n = 2; n <= 11; n++) {
+            if ((width >> (n - 1)) == 0 && (height >> (n - 1)) == 0) break;
+            if (image_size == (GLsizei)_ogx_texture_level_offset(n, width, height,
+                                                                 gx_format)) {
+                num_levels = n;
+                break;
+            }
+        }
+    }
+    if (num_levels == 0) {
+        set_error(GL_INVALID_VALUE);
+        return;
+    }
+
+    GX_DrawDone(); /* the texture might be in use by queued draws */
+
+    OgxTextureInfo ti;
+    bool ok;
+    if (num_levels > 1) {
+        /* Preparing the storage for level 1 allocates a full chain */
+        ok = _ogx_texture_prepare_storage(texobj, 1, width / 2, height / 2,
+                                          gx_format, &ti);
+        ti.minlevel = 0;
+        ti.maxlevel = num_levels - 1;
+    } else {
+        ok = _ogx_texture_prepare_storage(texobj, level, width, height,
+                                          gx_format, &ti);
+    }
+    if (!ok) return;
+
+    uint8_t *dst = (uint8_t *)ti.texels +
+        _ogx_texture_level_offset(level, ti.width, ti.height, ti.format);
+    if (data) {
+        memcpy(dst, data, image_size);
+        DCFlushRange(dst, image_size);
+        GX_InvalidateTexAll();
+    }
+    _ogx_texture_commit(texobj, &ti);
+    glparamstate.dirty.bits.dirty_tev = 1;
+}
+
 void glCompressedTexImage2D(GLenum target, GLint level, GLenum internal_format,
                             GLsizei width, GLsizei height, GLint border,
                             GLsizei image_size, const void *data)
@@ -113,6 +188,19 @@ void glCompressedTexImage2D(GLenum target, GLint level, GLenum internal_format,
         set_error(GL_INVALID_VALUE);
         return;
     }
+    int unit = glparamstate.active_texture;
+    int tex_id = glparamstate.texture_unit[unit].glcurtex;
+    gltexture_ *currtex = &texture_list[tex_id];
+    if (!TEXTURE_IS_RESERVED(texture_list[tex_id])) return;
+    GXTexObj *texobj = &currtex->texobj;
+
+    int native = native_gx_format(internal_format);
+    if (native >= 0) {
+        native_tex_image(currtex, level, native, width, height, image_size,
+                         data);
+        return;
+    }
+
     if (!is_dxt1(internal_format)) {
         /* This includes DXT3 and DXT5, which GX can't decode */
         set_error(GL_INVALID_ENUM);
@@ -122,12 +210,6 @@ void glCompressedTexImage2D(GLenum target, GLint level, GLenum internal_format,
         set_error(GL_INVALID_VALUE);
         return;
     }
-
-    int unit = glparamstate.active_texture;
-    int tex_id = glparamstate.texture_unit[unit].glcurtex;
-    gltexture_ *currtex = &texture_list[tex_id];
-    if (!TEXTURE_IS_RESERVED(texture_list[tex_id])) return;
-    GXTexObj *texobj = &currtex->texobj;
 
     GX_DrawDone(); /* the texture might be in use by queued draws */
 

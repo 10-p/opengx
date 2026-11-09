@@ -45,7 +45,8 @@ static GLubyte s_extension_string[] =
     "GL_ARB_multitexture "
     "GL_ARB_vertex_buffer_object "
     "GL_EXT_paletted_texture "
-    "GL_EXT_texture_compression_s3tc ";
+    "GL_EXT_texture_compression_s3tc "
+    "GL_OGX_native_texture ";
 
 static int prepare_extension_strings()
 {
