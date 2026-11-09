@@ -316,6 +316,7 @@ void ogx_initialize()
         // This is not a mistake, op 2 RGB is also SRC_ALPHA!
         tu->operand_rgb[2] = tu->operand_alpha[2] = GL_SRC_ALPHA;
         tu->color.r = tu->color.g = tu->color.b = tu->color.a = 0;
+        tu->rgb_scale = tu->alpha_scale = GX_CS_SCALE_1;
 
         tu->matrix_index = 0;
         guMtxIdentity(tu->matrix[0]);

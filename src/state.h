@@ -139,6 +139,9 @@ typedef struct {
     GLenum combine_alpha;
     GLenum source_alpha[3];
     GLenum operand_alpha[3];
+    /* GL_RGB_SCALE / GL_ALPHA_SCALE, stored as GX_CS_SCALE_* values */
+    uint8_t rgb_scale;
+    uint8_t alpha_scale;
     GXColor color; // TODO: still unused
 } OgxTextureUnit;
 

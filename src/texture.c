@@ -287,8 +287,21 @@ void glTexGeniv(GLenum coord, GLenum pname, const GLint *params)
 
 void glTexEnvf(GLenum target, GLenum pname, GLfloat param)
 {
-    /* For the time being, all the parameters we support take integer values */
+    /* For the time being, all the parameters we support take integer values
+     * (GL_RGB_SCALE and GL_ALPHA_SCALE only accept 1.0, 2.0 and 4.0) */
     glTexEnvi(target, pname, param);
+}
+
+/* Map a GL_RGB_SCALE / GL_ALPHA_SCALE value to the TEV output scale. Returns
+ * 0xff for values not allowed by the spec. */
+static uint8_t gl_scale_to_gx(GLint scale)
+{
+    switch (scale) {
+    case 1: return GX_CS_SCALE_1;
+    case 2: return GX_CS_SCALE_2;
+    case 4: return GX_CS_SCALE_4;
+    default: return 0xff;
+    }
 }
 
 void glGetTexLevelParameteriv(GLenum target, GLint level,
@@ -341,6 +354,20 @@ void glTexEnvi(GLenum target, GLenum pname, GLint param)
         break;
     case GL_TEXTURE_ENV_MODE:
         tu->mode = param;
+        break;
+    case GL_RGB_SCALE:
+    case GL_ALPHA_SCALE:
+        {
+            uint8_t scale = gl_scale_to_gx(param);
+            if (scale == 0xff) {
+                set_error(GL_INVALID_VALUE);
+                return;
+            }
+            if (pname == GL_RGB_SCALE)
+                tu->rgb_scale = scale;
+            else
+                tu->alpha_scale = scale;
+        }
         break;
     }
     glparamstate.dirty.bits.dirty_tev = 1;

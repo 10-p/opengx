@@ -372,15 +372,17 @@ static void setup_combine_operation(const OgxTextureUnit *te, u8 stage,
     TevInput rgb = compute_tev_input(te->combine_rgb, stage, te->color,
                                      source_rgb, false);
     GX_SetTevColorIn(stage, rgb.reg[0], rgb.reg[1], rgb.reg[2], rgb.reg[3]);
-    GX_SetTevColorOp(stage, rgb.tevop, rgb.bias, GX_CS_SCALE_1, GX_TRUE,
+    /* GL_RGB_SCALE maps directly to the TEV stage output scale; the TEV
+     * scales before clamping, which is the same order as OpenGL. */
+    GX_SetTevColorOp(stage, rgb.tevop, rgb.bias, te->rgb_scale, GX_TRUE,
                      GX_TEVPREV);
 
     TevInput alpha = compute_tev_input(te->combine_alpha, stage, te->color,
                                        source_alpha, true);
     GX_SetTevAlphaIn(stage, alpha.reg[0], alpha.reg[1],
                      alpha.reg[2], alpha.reg[3]);
-    GX_SetTevAlphaOp(stage, alpha.tevop, alpha.bias, GX_CS_SCALE_1, GX_TRUE,
-                     GX_TEVPREV);
+    GX_SetTevAlphaOp(stage, alpha.tevop, alpha.bias, te->alpha_scale,
+                     GX_TRUE, GX_TEVPREV);
 }
 
 static void setup_texture_stage(const OgxTextureUnit *tu,
@@ -420,7 +422,7 @@ static void setup_texture_stage(const OgxTextureUnit *tu,
         GX_SetTevAlphaIn(stage, GX_CA_ZERO, prev_alpha, GX_CA_TEXA, GX_CA_ZERO);
         break;
     }
-    if (!tu->mode != GL_COMBINE) {
+    if (tu->mode != GL_COMBINE) {
         /* setup_combine_operation() already sets the TEV ops */
         GX_SetTevColorOp(stage, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE,
                          GX_TEVPREV);
