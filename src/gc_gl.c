@@ -222,7 +222,12 @@ static void update_viewport()
         y = height - y;
         height = -height;
     }
-    GX_SetViewport(x, y, width, height, 0.0f, 1.0f);
+    /* glDepthRange maps to the viewport's Z range (upstream always used 0..1
+     * and stored the range only for the 2D/raster paths). The 2D projection
+     * uses the same range for its near/far planes, so raster positions keep
+     * their window Z. */
+    GX_SetViewport(x, y, width, height,
+                   glparamstate.depth_near, glparamstate.depth_far);
     glparamstate.dirty.bits.dirty_viewport = 0;
 }
 
@@ -525,10 +530,16 @@ void _ogx_setup_2D_projection()
     /* The 0.5f is to center the drawing into the pixels. */
     float left = glparamstate.viewport[0] - 0.5f;
     float top = glparamstate.viewport[1] - 0.5f;
+    /* With the viewport Z range set to the depth range, these near/far planes
+     * make a window Z (as in the raster position) land at that same depth.
+     * An empty range would divide by zero; any far plane gives the same
+     * result then, since the viewport maps everything to "near". */
+    float n = glparamstate.depth_near, f = glparamstate.depth_far;
+    if (f == n) f = n + 1.0f;
     guOrtho(proj,
             top, top + glparamstate.viewport[3],
             left, left + glparamstate.viewport[2],
-            glparamstate.depth_near, glparamstate.depth_far);
+            n, f);
     GX_LoadProjectionMtx(proj, GX_ORTHOGRAPHIC);
 
     glparamstate.dirty.bits.dirty_matrices = 1;
@@ -1554,8 +1565,13 @@ void glDepthMask(GLboolean flag)
 
 void glDepthRange(GLclampd near_val, GLclampd far_val)
 {
+    if (near_val < 0) near_val = 0;
+    if (near_val > 1) near_val = 1;
+    if (far_val < 0) far_val = 0;
+    if (far_val > 1) far_val = 1;
     glparamstate.depth_near = near_val;
     glparamstate.depth_far = far_val;
+    glparamstate.dirty.bits.dirty_viewport = 1;
 }
 
 GLint glRenderMode(GLenum mode)

@@ -187,6 +187,13 @@ Level sizes: `ceil(w/tw) * ceil(h/th) * 32` bytes (`*64` for RGBA8), with `tw x 
   Colour writes are now enabled only for `GL_COLOR_BUFFER_BIT`, and only if `glColorMask` allows them; a clear
   with neither colour nor depth to do draws nothing.
 
+### `glDepthRange`
+- The range was stored (and used by the raster/2D paths) but the viewport always had Z range 0..1, so 3D
+  drawing ignored it. `update_viewport()` now passes it to `GX_SetViewport()` as near/far, and `glDepthRange`
+  clamps to [0,1] and marks the viewport dirty. The 2D projection already used the range as its near/far
+  planes, which with the new viewport keeps raster positions at their window Z; an empty range (e.g. 1,1)
+  gets a dummy far plane there to avoid a division by zero.
+
 ### `glReadPixels`: GL orientation and a fast path
 - Bug fixed: the EFB copy rectangle used the GL `y` (bottom-left origin) as the EFB top coordinate, so
   `glReadPixels(x, y, ...)` read the rows mirrored around the window's middle (the rows inside the buffer were
