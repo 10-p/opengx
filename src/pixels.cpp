@@ -61,6 +61,12 @@ static struct FastConversion {
     0,
 };
 
+static void tile_16bpp(const uint16_t *src, int src_pitch_px,
+                       int width, int height,
+                       uint8_t *dst, int x, int y, int dstpitch);
+static void tile_rgba8(const uint8_t *src, int src_pitch, int width, int height,
+                       uint8_t *dst, int x, int y, int dstpitch);
+
 /* This template class is used to perform reading of a pixel and storing it in
  * the desired texture format in a single go. It does that in about 1/5th of
  * the time the generic algorithm (on Dolphin the difference is even bigger, up
@@ -272,6 +278,67 @@ void _ogx_bytes_to_texture(const void *data, GLenum format, GLenum type,
         return;
     }
 
+    /* Direct tiling paths for the common cases: RGBA bytes into RGBA8, RGB
+     * bytes into RGB565, RGBA bytes into RGB5A3, luminance bytes into I8,
+     * and 16-bit pixels which already have the GX encoding (5_6_5 into
+     * RGB565). These honour GL_UNPACK_ALIGNMENT, ROW_LENGTH, SKIP_*. */
+    int bpp = 0;
+    if (type == GL_UNSIGNED_BYTE) {
+        if (gx_format == GX_TF_RGBA8 && format == GL_RGBA) bpp = 4;
+        else if (gx_format == GX_TF_RGB5A3 && format == GL_RGBA) bpp = 4;
+        else if (gx_format == GX_TF_RGB565 && format == GL_RGB) bpp = 3;
+        else if (gx_format == GX_TF_I8 && !(format == GL_ALPHA) &&
+                 (format == GL_LUMINANCE || format == GL_INTENSITY)) bpp = 1;
+    } else if (type == GL_UNSIGNED_SHORT_5_6_5 && gx_format == GX_TF_RGB565 &&
+               format == GL_RGB && !glparamstate.unpack_swap_bytes) {
+        bpp = 2;
+    }
+    if (bpp && width <= 1024) {
+        int row_length = glparamstate.unpack_row_length > 0 ?
+            glparamstate.unpack_row_length : width;
+        int align = glparamstate.unpack_alignment;
+        int src_pitch = (row_length * bpp + align - 1) / align * align;
+        const uint8_t *src = static_cast<const uint8_t*>(data) +
+            glparamstate.unpack_skip_rows * src_pitch +
+            glparamstate.unpack_skip_pixels * bpp;
+        uint8_t *d8 = static_cast<uint8_t*>(dst);
+        if (gx_format == GX_TF_RGBA8) {
+            tile_rgba8(src, src_pitch, width, height, d8, x, y, dstpitch);
+            return;
+        }
+        if (bpp == 1) {
+            _ogx_tile_8bpp(src, src_pitch, width, height, d8, x, y, dstpitch);
+            return;
+        }
+        if (bpp != 2) {
+            /* Encode one row at a time into a 16-bit buffer, then tile it */
+            uint16_t row[1024] __attribute__((aligned(32)));
+            for (int ry = 0; ry < height; ry++) {
+                const uint8_t *s = src + ry * src_pitch;
+                if (gx_format == GX_TF_RGB565) {
+                    for (int rx = 0; rx < width; rx++, s += 3) {
+                        row[rx] = ((s[0] & 0xf8) << 8) | ((s[1] & 0xfc) << 3) |
+                            (s[2] >> 3);
+                    }
+                } else {
+                    TexelRGB5A3 t;
+                    for (int rx = 0; rx < width; rx++, s += 4) {
+                        t.set_color(s[0], s[1], s[2], s[3]);
+                        row[rx] = t.word;
+                    }
+                }
+                tile_16bpp(row, width, width, 1, d8, x, y + ry, dstpitch);
+            }
+            return;
+        }
+        if ((uintptr_t(src) & 1) == 0 && (src_pitch & 1) == 0) {
+            tile_16bpp(reinterpret_cast<const uint16_t*>(src), src_pitch / 2,
+                       width, height, static_cast<uint8_t*>(dst),
+                       x, y, dstpitch);
+            return;
+        }
+    }
+
     /* The GL_UNPACK_SKIP_ROWS and GL_UNPACK_SKIP_PIXELS can be handled here by
      * modifiying the source data pointer. */
     bool need_skip_pixels = false;
@@ -467,6 +534,78 @@ void _ogx_tile_8bpp(const uint8_t *src, int src_pitch, int width, int height,
         for (int rx = 0; rx < width; rx++) {
             int tx = x + rx;
             line[(tx >> 3) * 32 + (tx & 7)] = s[rx];
+        }
+    }
+}
+
+/* Store 16-bit texels (RGB565, RGB5A3, IA8) already in their final encoding
+ * into the GX layout: 4x4 tiles of 32 bytes, one 8-byte line per texel row.
+ * "dstpitch" as returned by _ogx_pitch_for_width(). */
+static void tile_16bpp(const uint16_t *src, int src_pitch_px,
+                       int width, int height,
+                       uint8_t *dst, int x, int y, int dstpitch)
+{
+    const int tile_row_bytes = dstpitch * 4;
+    bool aligned = ((x | width) & 3) == 0 && (uintptr_t(src) & 3) == 0 &&
+        (src_pitch_px & 1) == 0;
+    for (int ry = 0; ry < height; ry++) {
+        int ty = y + ry;
+        const uint16_t *s = src + ry * src_pitch_px;
+        uint8_t *line = dst + (ty >> 2) * tile_row_bytes + (ty & 3) * 8;
+        if (aligned) {
+            const uint32_t *s32 = reinterpret_cast<const uint32_t*>(s);
+            uint32_t *d = reinterpret_cast<uint32_t*>(line + (x >> 2) * 32);
+            for (int bx = 0; bx < width / 4; bx++) {
+                d[0] = s32[0];
+                d[1] = s32[1];
+                s32 += 2;
+                d += 8;
+            }
+        } else {
+            for (int rx = 0; rx < width; rx++) {
+                int tx = x + rx;
+                *reinterpret_cast<uint16_t*>(line + (tx >> 2) * 32 +
+                                             (tx & 3) * 2) = s[rx];
+            }
+        }
+    }
+}
+
+/* RGBA bytes into GX RGBA8: 4x4 tiles of 64 bytes, the first 32 holding
+ * (A, R) pairs and the last 32 (G, B) pairs. Two texels per 32-bit word. */
+static void tile_rgba8(const uint8_t *src, int src_pitch, int width, int height,
+                       uint8_t *dst, int x, int y, int dstpitch)
+{
+    const int tile_row_bytes = dstpitch * 4;
+    for (int ry = 0; ry < height; ry++) {
+        int ty = y + ry;
+        const uint8_t *s = src + ry * src_pitch;
+        uint8_t *line = dst + (ty >> 2) * tile_row_bytes + (ty & 3) * 8;
+        int rx = 0;
+        if ((uintptr_t(s) & 3) == 0) {
+            /* Head, until x is even */
+            const uint32_t *s32 = reinterpret_cast<const uint32_t*>(s);
+            for (; rx < width && ((x + rx) & 1); rx++) {
+                int tx = x + rx;
+                uint8_t *t = line + (tx >> 2) * 64 + (tx & 3) * 2;
+                uint32_t p = s32[rx];
+                t[0] = p; t[1] = p >> 24; t[32] = p >> 16; t[33] = p >> 8;
+            }
+            for (; rx + 1 < width; rx += 2) {
+                int tx = x + rx;
+                uint32_t *t = reinterpret_cast<uint32_t*>(
+                    line + (tx >> 2) * 64 + (tx & 3) * 2);
+                uint32_t p0 = s32[rx], p1 = s32[rx + 1]; /* RRGGBBAA */
+                t[0] = ((p0 & 0xff) << 24) | ((p0 >> 8) & 0x00ff0000) |
+                    ((p1 & 0xff) << 8) | (p1 >> 24);
+                t[8] = ((p0 << 8) & 0xffff0000) | ((p1 >> 8) & 0xffff);
+            }
+        }
+        for (; rx < width; rx++) {
+            int tx = x + rx;
+            uint8_t *t = line + (tx >> 2) * 64 + (tx & 3) * 2;
+            const uint8_t *p = s + rx * 4;
+            t[0] = p[3]; t[1] = p[0]; t[32] = p[1]; t[33] = p[2];
         }
     }
 }

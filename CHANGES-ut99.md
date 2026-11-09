@@ -147,6 +147,18 @@ Level sizes: `ceil(w/tw) * ceil(h/th) * 32` bytes (`*64` for RGBA8), with `tw x 
   replaced/modulated the colour with A, `GL_RGB` + `GL_REPLACE` replaced the fragment alpha with 1); in
   `GL_COMBINE` such a texture's alpha source reads 1.0 and an alpha texture's colour source reads 0.
 
+### Upload fast paths
+- Direct tilers in `_ogx_bytes_to_texture()` (before the registered/generic converters) for:
+  `GL_RGBA`/`GL_UNSIGNED_BYTE` → RGBA8 (two texels per pair of 32-bit stores), `GL_RGB`/
+  `GL_UNSIGNED_SHORT_5_6_5` → RGB565 (a tiled copy, two 32-bit words per tile line; upstream had no fast path
+  at all for packed types), `GL_RGB` bytes → RGB565, `GL_RGBA` bytes → RGB5A3 (row encode + tiled copy),
+  `GL_LUMINANCE`/`GL_INTENSITY` bytes → I8 (byte tiling). They honour `GL_UNPACK_ALIGNMENT`,
+  `GL_UNPACK_ROW_LENGTH`, `GL_UNPACK_SKIP_PIXELS/ROWS` and arbitrary sub-image offsets (unlike the upstream
+  readers, which ignore the alignment: with them, rows of e.g. 7 16-bit texels were read tightly packed).
+- After a (sub-)image update only the touched rows of tiles are flushed from the data cache.
+- 256x256 emulated: RGBA8 3.15 → 1.00 ms, 5_6_5 → RGB565 14.73 → 0.20 ms, RGB → RGB565 3.11 → 1.21 ms,
+  RGBA → RGB5_A1 19.9 (corrupt) → 2.47 ms, L → I8 2.28 → 0.10 ms; 64x64 sub-image into 512x512 RGBA8 0.10 ms.
+
 ## Framebuffer
 
 ### `glReadPixels`: GL orientation and a fast path

@@ -478,13 +478,25 @@ static void update_texture(const void *data, int level, GLenum format, GLenum ty
                                        width, height, needswap);
     }
 
-    /* Flush the whole level: a sub-image is scattered over all of it in the
-     * tiled layout (upstream flushed only width*height bytes from the start
-     * of the level, which misses the data of sub-images not at the origin;
-     * invisible in Dolphin, which doesn't emulate the data cache). */
-    DCFlushRange(dst_addr, calc_memory(ti->width >> level ? ti->width >> level : 1,
-                                       ti->height >> level ? ti->height >> level : 1,
-                                       ti->format));
+    /* Flush the rows of tiles touched by the update: a sub-image is spread
+     * over whole tile rows in the tiled layout (upstream flushed only
+     * width*height bytes from the start of the level, which misses the data
+     * of sub-images not at the origin; invisible in Dolphin, which doesn't
+     * emulate the data cache). */
+    int level_w = ti->width >> level ? ti->width >> level : 1;
+    int level_h = ti->height >> level ? ti->height >> level : 1;
+    uint32_t level_size = calc_memory(level_w, level_h, ti->format);
+    int pitch = _ogx_pitch_for_width(ti->format, level_w);
+    if (ti->format != GX_TF_CMPR && pitch > 0) {
+        int tile_h = ti->format == GX_TF_I4 ? 8 : 4;
+        uint32_t row_bytes = pitch * tile_h;
+        uint32_t start = (y / tile_h) * row_bytes;
+        uint32_t end = ((y + height + tile_h - 1) / tile_h) * row_bytes;
+        if (end > level_size) end = level_size;
+        DCFlushRange(dst_addr + start, end - start);
+    } else {
+        DCFlushRange(dst_addr, level_size);
+    }
 
     // Slow but necessary! The new textures may be in the same region of some old cached textures
     GX_InvalidateTexAll();
