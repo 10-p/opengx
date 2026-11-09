@@ -129,3 +129,19 @@ Any other size → `GL_INVALID_VALUE`. Mipmapped textures must have power-of-two
 Level sizes: `ceil(w/tw) * ceil(h/th) * 32` bytes (`*64` for RGBA8), with `tw x th` the tile size above
 (`GX_GetTexBufferSize()`, except for CI8 where libogc is wrong: CI8 is sized like I8). In a chain, level k
 (`max(w>>k,1) x max(h>>k,1)`) starts right after level k-1.
+
+## Framebuffer
+
+### `glReadPixels`: GL orientation and a fast path
+- Bug fixed: the EFB copy rectangle used the GL `y` (bottom-left origin) as the EFB top coordinate, so
+  `glReadPixels(x, y, ...)` read the rows mirrored around the window's middle (the rows inside the buffer were
+  already written bottom-up correctly). The source rectangle is now `top = window_height - y - height`, with the
+  viewport height as the window height (the same convention as the scissor code). Applies to every format.
+- Fast path for `GL_RGBA`/`GL_RGB` + `GL_UNSIGNED_BYTE` (no skip pixels/rows, no FBO read target): one
+  `GX_CopyTex` of the rectangle into an RGBA8 buffer, then a de-tiling loop that reads the AR and GB halves of
+  each 4x4 tile two texels per 32-bit word and writes rows bottom-up; honours `GL_PACK_ALIGNMENT` and
+  `GL_PACK_ROW_LENGTH`. 640x480 RGBA: 69 ms → 6.8 ms (emulated).
+- `OPENGX_READPIXELS` env var: `copy` (EFB copy only), `peek` (`GX_PeekARGB` per pixel), `auto` (default):
+  copy, and if the copy did not reach RAM fall back to peek. "Did not reach RAM" is detected by pre-zeroing the
+  first tile's alpha bytes: a copy from a `GX_PF_RGB8_Z24` EFB always writes alpha 0xff. That case only
+  happens in emulators (Dolphin's "Store EFB copies to texture only").

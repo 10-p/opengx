@@ -41,6 +41,8 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include <GL/gl.h>
 #include <malloc.h>
+#include <stdlib.h>
+#include <string.h>
 #include <memory>
 #include <type_traits>
 
@@ -444,9 +446,160 @@ struct PixelWriter {
     GLenum m_type;
 };
 
+/* GL window coordinates have the origin at the bottom-left, the EFB at the
+ * top-left. Like the scissor code, take the viewport height as the window
+ * height. */
+static inline int efb_top_for_rect(int y, int height)
+{
+    return glparamstate.viewport[3] - y - height;
+}
+
+/* glReadPixels() fast path for GL_RGBA / GL_RGB with GL_UNSIGNED_BYTE.
+ *
+ * Mode "copy" (default): one EFB -> RGBA8 texture copy (GX_CopyTex), then a
+ * de-tiling loop: an RGBA8 tile is 4x4 texels, 64 bytes: 16 (A,R) byte pairs
+ * followed by 16 (G,B) pairs. We read two texels per 32-bit word of each
+ * half, and write the rows bottom-up as GL wants them.
+ *
+ * Mode "peek": GX_PeekARGB() per pixel (a CPU read of the EFB through its
+ * memory-mapped window), which needs no RAM buffer.
+ *
+ * Mode "auto" (default): "copy", but if the copy did not land in RAM - which
+ * happens in Dolphin unless "Store EFB copies to texture only" is disabled -
+ * fall back to "peek". We detect that with the alpha channel: copying an EFB
+ * without alpha (GX_PF_RGB8_Z24) always writes A = 0xff, so a tile whose
+ * alpha bytes are still zero was not written. Select a mode with the
+ * OPENGX_READPIXELS environment variable ("copy", "peek", "auto"). */
+enum ReadPixelsMode { READ_AUTO, READ_COPY, READ_PEEK };
+extern "C" uint8_t s_efb_pixel_format;
+
+static ReadPixelsMode read_pixels_mode()
+{
+    const char *env = getenv("OPENGX_READPIXELS");
+    if (env && strcmp(env, "copy") == 0) return READ_COPY;
+    if (env && strcmp(env, "peek") == 0) return READ_PEEK;
+    return READ_AUTO;
+}
+
+static inline void store_pixel(uint8_t *out, uint32_t rgba, int ncomp)
+{
+    out[0] = rgba >> 24;
+    out[1] = rgba >> 16;
+    out[2] = rgba >> 8;
+    if (ncomp == 4) out[3] = rgba;
+}
+
+static void read_pixels_peek(int x, int efb_top, int width, int height,
+                             int ncomp, uint8_t *data, int pitch)
+{
+    GX_DrawDone();
+    for (int row = 0; row < height; row++) {
+        /* GL row 0 is the bottom one */
+        uint8_t *out = data + (height - 1 - row) * pitch;
+        for (int col = 0; col < width; col++) {
+            GXColor c;
+            GX_PeekARGB(x + col, efb_top + row, &c);
+            store_pixel(out, (c.r << 24) | (c.g << 16) | (c.b << 8) | c.a,
+                        ncomp);
+            out += ncomp;
+        }
+    }
+}
+
+static bool read_pixels_fast(int x, int y, int width, int height,
+                             GLenum format, uint8_t *data)
+{
+    int ncomp = format == GL_RGBA ? 4 : 3;
+    int row_length = glparamstate.pack_row_length > 0 ?
+        glparamstate.pack_row_length : width;
+    int align = glparamstate.pack_alignment > 0 ?
+        glparamstate.pack_alignment : 4;
+    int pitch = (row_length * ncomp + align - 1) / align * align;
+    int efb_top = efb_top_for_rect(y, height);
+
+    ReadPixelsMode mode = read_pixels_mode();
+    if (mode == READ_PEEK) {
+        read_pixels_peek(x, efb_top, width, height, ncomp, data, pitch);
+        return true;
+    }
+
+    int tiles_x = (width + 3) / 4;
+    u32 size = GX_GetTexBufferSize(width, height, GX_TF_RGBA8, 0, GX_FALSE);
+    uint8_t *tiles = (uint8_t *)memalign(32, size);
+    if (!tiles) return false;
+    bool check_landed = mode == READ_AUTO &&
+        s_efb_pixel_format == GX_PF_RGB8_Z24;
+    if (check_landed) {
+        memset(tiles, 0, 32);
+        DCFlushRange(tiles, 32);
+    }
+    _ogx_efb_save_area_to_buffer(GX_TF_RGBA8, x, efb_top, width, height,
+                                 tiles, OGX_EFB_NONE);
+    if (check_landed && (tiles[0] | tiles[2] | tiles[4] | tiles[6]) == 0) {
+        free(tiles);
+        warning("glReadPixels: the EFB copy didn't reach RAM, using "
+                "GX_PeekARGB (Dolphin: disable \"Store EFB copies to "
+                "texture only\")");
+        read_pixels_peek(x, efb_top, width, height, ncomp, data, pitch);
+        return true;
+    }
+
+    for (int row = 0; row < height; row++) {
+        const uint8_t *tile_line = tiles + (row >> 2) * tiles_x * 64 +
+            (row & 3) * 8;
+        uint8_t *out = data + (height - 1 - row) * pitch;
+        int col = 0;
+        for (int tx = 0; tx < tiles_x; tx++) {
+            const uint32_t *ar = (const uint32_t *)(tile_line + tx * 64);
+            const uint32_t *gb = ar + 8;
+            for (int i = 0; i < 2 && col < width; i++) {
+                uint32_t a = ar[i], g = gb[i];
+                /* a = A0 R0 A1 R1, g = G0 B0 G1 B1 */
+                uint32_t p0 = ((a & 0x00ff0000) << 8) |
+                    ((g & 0xffff0000) >> 8) | (a >> 24);
+                uint32_t p1 = ((a & 0x000000ff) << 24) |
+                    ((g & 0x0000ffff) << 8) | ((a >> 8) & 0xff);
+                if (ncomp == 4 && ((uintptr_t)out & 3) == 0) {
+                    *(uint32_t *)out = p0;
+                    out += 4;
+                    if (++col < width) {
+                        *(uint32_t *)out = p1;
+                        out += 4;
+                        col++;
+                    }
+                } else {
+                    store_pixel(out, p0, ncomp);
+                    out += ncomp;
+                    if (++col < width) {
+                        store_pixel(out, p1, ncomp);
+                        out += ncomp;
+                        col++;
+                    }
+                }
+            }
+        }
+    }
+    free(tiles);
+    return true;
+}
+
 void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
                   GLenum format, GLenum type, GLvoid *data)
 {
+    if (width < 0 || height < 0) {
+        set_error(GL_INVALID_VALUE);
+        return;
+    }
+    if (width == 0 || height == 0) return;
+
+    if ((format == GL_RGBA || format == GL_RGB) && type == GL_UNSIGNED_BYTE &&
+        glparamstate.pack_skip_pixels == 0 &&
+        glparamstate.pack_skip_rows == 0 && !glparamstate.pack_swap_bytes &&
+        _ogx_fbo_state.read_target == 0) {
+        if (read_pixels_fast(x, y, width, height, format, (uint8_t *)data))
+            return;
+    }
+
     uint8_t gxformat = 0xff;
     const ReadPixelFormat *read_format = NULL;
     ReadPixelFormat stencil_format;
@@ -478,7 +631,8 @@ void glReadPixels(GLint x, GLint y, GLsizei width, GLsizei height,
         u32 size = GX_GetTexBufferSize(width, height,
                                        read_format->gx_dest_format, 0, GX_FALSE);
         texels = memalign(32, size);
-        _ogx_efb_save_area_to_buffer(read_format->gx_copy_format, x, y,
+        _ogx_efb_save_area_to_buffer(read_format->gx_copy_format, x,
+                                     efb_top_for_rect(y, height),
                                      width, height, texels, OGX_EFB_NONE);
         must_free_texels = true;
     }
