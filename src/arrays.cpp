@@ -1317,6 +1317,145 @@ bool _ogx_arrays_plan_arrays(uint8_t gxmode, bool loop, int first, int count)
     return true;
 }
 
+/* ---------------------------------------------------------------------------
+ * Draws compiled into OpenGL display lists (glNewList): the vertex data of
+ * every attribute is copied once (packed per attribute, buffer object data
+ * too: the list keeps the data of the time it was compiled) and the draw's
+ * indices become a GX display list.
+ */
+
+struct ListArray {
+    uint8_t attribute, type, size, stride;
+    void *data;
+};
+
+struct OgxListArrays {
+    uint8_t num_arrays;
+    uint8_t input; /* GX_INDEX8 or GX_INDEX16 */
+    ListArray a[MAX_READERS];
+    void *dl;
+    uint32_t dl_size;
+};
+
+OgxListArrays *_ogx_arrays_compile_list(uint8_t gxmode, int count, bool loop,
+                                        int (*index_cb)(int i, void *data),
+                                        void *cb_data, bool add_normal,
+                                        bool add_colors)
+{
+    if (count <= 0) return NULL;
+    if (!s_plan.classified) classify_sources();
+    if (s_plan.num_indexed == 0 || !s_plan.all_indexed) return NULL;
+    const int total = count + loop;
+    if (total > 65534) return NULL;
+
+    int min = 0x7fffffff, max = -1;
+    for (int i = 0; i < count; i++) {
+        int v = index_cb(i, cb_data);
+        if (v < min) min = v;
+        if (v > max) max = v;
+    }
+    if (min < 0 || max - min + 1 > 65534) return NULL;
+    const int range = max - min + 1;
+
+    OgxListArrays *l =
+        static_cast<OgxListArrays*>(calloc(1, sizeof(OgxListArrays)));
+    if (!l) return NULL;
+    l->input = range <= 255 ? GX_INDEX8 : GX_INDEX16;
+    const int isz = l->input == GX_INDEX8 ? 1 : 2;
+
+    const int n = count_attributes();
+    int bytes_per_vertex = 0;
+    for (int i = 0; i < n; i++) {
+        if (s_plan.mode[i] != IDX_INDEX) continue;
+        const GxSource &src = s_plan.src[i];
+        const GxVertexFormat &f = get_reader(&s_readers[i])->gx_format();
+        bool color_float = s_plan.kind[i] == GXS_COLOR_FLOAT;
+        int elem = color_float ? src.num_components : src.elem_bytes;
+        ListArray &a = l->a[l->num_arrays++];
+        a.attribute = f.attribute;
+        a.type = f.type;
+        a.size = f.size;
+        a.stride = elem;
+        a.data = memalign(32, range * elem);
+        if (!a.data) {
+            _ogx_arrays_free_list(l);
+            return NULL;
+        }
+        uint8_t *out = static_cast<uint8_t*>(a.data);
+        const char *in = src.data + min * src.stride;
+        for (int v = 0; v < range; v++, in += src.stride, out += elem) {
+            if (color_float)
+                ColorVertexReader<float>::convert(
+                    reinterpret_cast<const float*>(in), elem, out);
+            else
+                memcpy(out, in, elem);
+        }
+        DCStoreRange(a.data, range * elem);
+        bytes_per_vertex += isz;
+    }
+    bytes_per_vertex += add_normal + 2 * add_colors;
+
+    uint32_t capacity = (3 + uint32_t(total) * bytes_per_vertex + 63) & ~31u;
+    l->dl = memalign(32, capacity);
+    if (!l->dl) {
+        _ogx_arrays_free_list(l);
+        return NULL;
+    }
+    DCInvalidateRange(l->dl, capacity);
+    GX_BeginDispList(l->dl, capacity);
+    GX_Begin(gxmode, GX_VTXFMT0, total);
+    for (int i = 0; i < total; i++) {
+        uint32_t v = index_cb(i < count ? i : 0, cb_data) - min;
+        for (int a = 0; a < n; a++) {
+            if (s_plan.mode[a] == IDX_INDEX) {
+                if (isz == 1) wgPipe->U8 = v;
+                else wgPipe->U16 = v;
+            }
+            uint8_t attribute =
+                get_reader(&s_readers[a])->gx_format().attribute;
+            /* The current normal and colours (indexed arrays of one
+             * element, set up when the list is called) in the GX attribute
+             * order: position, normal, colour 0, colour 1 */
+            if (attribute == GX_VA_POS && add_normal) wgPipe->U8 = 0;
+            if ((attribute == GX_VA_POS && add_normal) ||
+                attribute == GX_VA_NRM) {
+                if (add_colors) { wgPipe->U8 = 0; wgPipe->U8 = 0; }
+            }
+        }
+    }
+    GX_End();
+    l->dl_size = GX_EndDispList();
+    if (l->dl_size == 0) {
+        _ogx_arrays_free_list(l);
+        return NULL;
+    }
+    return l;
+}
+
+void _ogx_arrays_list_setup(const OgxListArrays *l)
+{
+    for (int i = 0; i < l->num_arrays; i++) {
+        const ListArray &a = l->a[i];
+        GX_SetVtxDesc(a.attribute, l->input);
+        GX_SetVtxAttrFmt(GX_VTXFMT0, a.attribute, a.type, a.size, 0);
+        GX_SetArray(a.attribute, a.data, a.stride);
+    }
+}
+
+void *_ogx_arrays_list_dl(const OgxListArrays *l, uint32_t *size)
+{
+    *size = l->dl_size;
+    return l->dl;
+}
+
+void _ogx_arrays_free_list(OgxListArrays *l)
+{
+    if (!l) return;
+    for (int i = 0; i < l->num_arrays; i++) free(l->a[i].data);
+    free(l->dl);
+    free(l);
+}
+
 bool _ogx_arrays_indexed_planned()
 {
     return s_plan.active;

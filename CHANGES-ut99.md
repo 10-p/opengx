@@ -128,6 +128,27 @@ triangles, 5112 vertices of 44 bytes: position, normal, RGBA8 colour, two textur
 - Check: `o.indexed`: element buffer drawn four times (streamed, compiled, called), then rewritten with other
   indices (the new ones are drawn), then restored; glDrawArrays lists through the per-row draws.
 
+### Display lists: draws compiled as indexed data
+- A `glDrawElements`/`glDrawArrays` (or `glBegin`/`glEnd`) inside `glNewList` is compiled into a copy of the
+  vertex range it uses, packed per attribute (buffer object data copied too: a list keeps the data of when it
+  was compiled), plus a GX display list of 8- or 16-bit indices. `glCallList` sets the vertex descriptors,
+  formats and `GX_SetArray` for the list's copies and calls the GX list; state commands in the list are replayed
+  by opengx as before (the TEV, matrix and texture code is unchanged). The current normal/colour stand-ins for
+  disabled arrays keep working (one-element indexed arrays, as before).
+- Draws with an attribute that cannot be indexed (4-component positions, conversions, generated texture
+  coordinates) keep the direct-data list, now sized from the vertex count instead of a fixed 1 MB buffer.
+- **Upstream bugs:** a list draw with a colour array and lighting off sent the colour twice per vertex while the
+  vertex descriptor had one colour (every vertex after the first misread: garbage); a draw with more than 1 MB
+  of direct data overflowed the list buffer and drew nothing (the bench's single-draw 9940-triangle list);
+  compiling printed "Created draw list" to stderr; `glDeleteLists` freed list memory the GPU could still read.
+- Bench: the 9940-triangle mesh as one list draw now draws (0.50 ms draw+finish; before: nothing drawn), as 100
+  list draws 0.03 -> 0.15 ms submit (`GX_SetArray` per draw); compile 12.05 -> 5.89 ms (one draw), 45.24 -> 9.24
+  ms (100 draws); list memory for the one-draw mesh about 0.5 MB (copies 0.2 MB + indices 0.3 MB) instead of
+  1.2 MB of direct data.
+- Check: `o.indexed` display lists (one draw, one per row, arrays changed after compiling, from a buffer object,
+  with direct data, of `glBegin`/`glEnd`), unlit and lit: the same pixels as the arrays drawn directly (the
+  unlit ones failed before).
+
 ## Lighting
 
 ### `GL_COLOR_MATERIAL` with `GL_EMISSION` and a colour array

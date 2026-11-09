@@ -31,6 +31,7 @@ POSSIBILITY OF SUCH DAMAGE.
 *****************************************************************************/
 
 #include "call_lists.h"
+#include "arrays.h"
 #include "debug.h"
 #include "efb.h"
 #include "gpu_resources.h"
@@ -46,8 +47,9 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #define MAX_COMMANDS_PER_BUFFER 4
 #define MAX_CALL_LISTS 1536
-/* The glut teapot can take more than 300KB, for reference */
-#define MAX_GXLIST_SIZE (1024 * 1024)
+/* The largest direct vertex: position, normal, two colours and eight
+ * texture coordinate pairs, rounded up */
+#define MAX_DIRECT_VERTEX_SIZE 128
 #define CALL_LIST_START_ID 1
 
 typedef struct
@@ -107,6 +109,9 @@ typedef struct
             union client_state cs;
             u32 list_size;
             void *gxlist;
+            /* Indexed vertex data and the GX display list of indices
+             * (gxlist points into it); NULL for direct data in gxlist */
+            OgxListArrays *arrays;
             struct AttribFormat {
                 unsigned attribute : 5;
                 /* Most of these only require 2-3 bits, but let's round it */
@@ -242,7 +247,8 @@ static void setup_draw_geometry(struct DrawGeometry *dg,
     /* Setup the same vertex attribute descriptions that were in place when the
      * list was created */
     GX_ClearVtxDesc();
-    for (int i = 0; i < CALL_LIST_DRAW_FORMATS(dg->formats); i++) {
+    if (dg->arrays) _ogx_arrays_list_setup(dg->arrays);
+    else for (int i = 0; i < CALL_LIST_DRAW_FORMATS(dg->formats); i++) {
         if (dg->formats[i].inputmode == GX_NONE) continue;
         uint8_t attribute = dg->formats[i].attribute;
         GX_SetVtxDesc(attribute, dg->formats[i].inputmode);
@@ -278,7 +284,8 @@ static void setup_draw_geometry(struct DrawGeometry *dg,
 static void execute_draw_geometry_list(struct DrawGeometry *dg)
 {
     bool uses_indexed_data = !dg->cs.normal_enabled || !dg->cs.color_enabled;
-    if (!s_last_client_state_is_valid ||
+    /* Lists with their own arrays point the GX arrays at them every time */
+    if (dg->arrays || !s_last_client_state_is_valid ||
         s_last_client_state.as_int != dg->cs.as_int) {
         setup_draw_geometry(dg, uses_indexed_data);
         s_last_client_state = dg->cs;
@@ -304,6 +311,8 @@ static void flat_draw_geometry(void *cb_data)
 static void run_draw_geometry(struct DrawGeometry *dg)
 {
     union client_state cs;
+
+    if (!dg->gxlist) return; /* compiling it failed */
 
     /* Update the drawing mode on the list. This required peeping into
      * GX_Begin() code. */
@@ -446,19 +455,15 @@ static void queue_draw_geometry(struct DrawGeometry *dg,
      * attributes: this will allow us to set the value of the indexed attribute
      * at the time when the list is executed. */
     dg->mode = mode;
-    dg->gxlist = memalign(32, MAX_GXLIST_SIZE);
-    DCInvalidateRange(dg->gxlist, MAX_GXLIST_SIZE);
     dg->cs = glparamstate.cs;
+    dg->arrays = NULL;
     OgxDrawMode gxmode = _ogx_draw_mode(mode);
     dg->count = count + gxmode.loop;
 
     if (glparamstate.dirty.bits.dirty_attributes)
         _ogx_update_vertex_array_readers(gxmode);
 
-    OgxArrayReader *vertex_reader = NULL;
-    OgxArrayReader *normal_reader = NULL;
-    OgxArrayReader *color_reader = NULL;
-    OgxArrayReader *texcoord_reader[MAX_TEXTURE_UNITS] = { NULL };
+    bool has_normal = false, has_color = false;
 
     /* Get the GX formats used right now */
     OgxArrayReader *reader = NULL;
@@ -474,57 +479,70 @@ static void queue_draw_geometry(struct DrawGeometry *dg,
         dg->formats[format_index].compsize = size;
         format_index++;
 
-        if (attribute == GX_VA_POS) {
-            vertex_reader = reader;
-        } else if (attribute == GX_VA_NRM) {
-            normal_reader = reader;
-        } else if (attribute == GX_VA_CLR0) {
-            /* Ignore CLR1, since, if present, it's identical */
-            color_reader = reader;
-        } else if (attribute >= GX_VA_TEX0 &&
-                   attribute < GX_VA_TEX0 + MAX_TEXTURE_UNITS) {
-            texcoord_reader[attribute - GX_VA_TEX0] = reader;
-        }
+        if (attribute == GX_VA_NRM) has_normal = true;
+        if (attribute == GX_VA_CLR0) has_color = true;
     }
 
-    GX_BeginDispList(dg->gxlist, MAX_GXLIST_SIZE);
+    /* Indexed: the vertex data copied once, a display list of indices */
+    dg->arrays = _ogx_arrays_compile_list(gxmode.mode, count, gxmode.loop,
+                                          index_cb, index_data,
+                                          !has_normal, !has_color);
+    if (dg->arrays) {
+        dg->gxlist = _ogx_arrays_list_dl(dg->arrays, &dg->list_size);
+        return;
+    }
+
+    /* Direct data: every attribute as the draw would send it */
+    u32 capacity = (dg->count * MAX_DIRECT_VERTEX_SIZE + 63) & ~31;
+    void *buffer = memalign(32, capacity);
+    dg->gxlist = NULL;
+    dg->list_size = 0;
+    if (!buffer) {
+        warning("Out of memory compiling a draw into a list");
+        return;
+    }
+    DCInvalidateRange(buffer, capacity);
+    GX_BeginDispList(buffer, capacity);
 
     /* Note that the drawing mode set here will be overwritten when executing the list */
 
     GX_Begin(gxmode.mode, GX_VTXFMT0, dg->count);
     for (int i = 0; i < dg->count; i++) {
         int index = index_cb(i % count, index_data);
-        float value[4];
-        _ogx_array_reader_process_element(vertex_reader, index);
-
-        if (normal_reader) {
-            _ogx_array_reader_process_element(normal_reader, index);
-        } else {
-            GX_Normal1x8(0);
-        }
-
-        /* The color data is duplicated to CLR0 and CLR1 */
-        if (color_reader) {
-            _ogx_array_reader_process_element(color_reader, index);
-            _ogx_array_reader_process_element(color_reader, index);
-        } else {
-            GX_Color1x8(0);
-            GX_Color1x8(0);
-        }
-
-        for (int tex = 0; tex < MAX_TEXTURE_UNITS; tex++) {
-            if (texcoord_reader[tex]) {
-                _ogx_array_reader_process_element(texcoord_reader[tex], index);
+        reader = NULL;
+        while (reader = _ogx_array_reader_next(reader)) {
+            uint8_t attribute, inputmode, size, type;
+            _ogx_array_reader_get_format(reader, &attribute, &inputmode,
+                                         &type, &size);
+            _ogx_array_reader_process_element(reader, index);
+            /* The current normal and colours, in the GX attribute order */
+            if (attribute == GX_VA_POS && !has_normal) GX_Normal1x8(0);
+            if (!has_color &&
+                ((attribute == GX_VA_POS && !has_normal) ||
+                 attribute == GX_VA_NRM)) {
+                GX_Color1x8(0);
+                GX_Color1x8(0);
             }
         }
     }
     GX_End();
 
     u32 size = GX_EndDispList();
-    fprintf(stderr, "Created draw list %u\n", size);
-    /* Free any excess memory */
-    void *new_ptr = realloc(dg->gxlist, size);
-    assert(new_ptr == dg->gxlist);
+    if (size == 0) {
+        warning("Draw too large for a list");
+        free(buffer);
+        return;
+    }
+    /* Keep only what was used */
+    void *list = memalign(32, size);
+    if (list) {
+        memcpy(list, buffer, size);
+        DCStoreRange(list, size);
+        free(buffer);
+    } else {
+        list = buffer;
+    }
+    dg->gxlist = list;
     dg->list_size = size;
 }
 
@@ -557,7 +575,10 @@ static void destroy_buffer(CommandBuffer *buffer)
         /* Free the memory for those commands who allocated it */
         if (command->type == COMMAND_DRAW_ELEMENTS ||
             command->type == COMMAND_DRAW_ARRAYS) {
-            free(command->c.draw_geometry.gxlist);
+            if (command->c.draw_geometry.arrays)
+                _ogx_arrays_free_list(command->c.draw_geometry.arrays);
+            else
+                free(command->c.draw_geometry.gxlist);
         }
     }
     free(buffer);
@@ -569,6 +590,8 @@ static void destroy_list(int index)
     if (!LIST_IS_RESERVED_OR_USED(index)) return;
 
     if (BUFFER_IS_VALID(list->head)) {
+        /* The GPU may still be reading the list's data */
+        GX_DrawDone();
         destroy_buffer(list->head);
     }
     list->head = NULL;

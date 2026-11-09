@@ -87,6 +87,23 @@ bool _ogx_arrays_plan_elements(uint8_t gxmode, bool loop, int count,
                                VboType vbo, uint32_t offset);
 bool _ogx_arrays_plan_arrays(uint8_t gxmode, bool loop, int first, int count);
 bool _ogx_arrays_indexed_planned(void);
+/* A draw of the current readers compiled for glNewList(): count vertices
+ * (plus the first again for a loop) whose array indices index_cb() returns,
+ * with copies of the vertex data and a GX display list of indices. add_normal
+ * and add_colors put a GX_INDEX8 index 0 for the normal and for both colours
+ * after the position (the current values, set up at call time). NULL when
+ * some attribute cannot be indexed. */
+typedef struct OgxListArrays OgxListArrays;
+OgxListArrays *_ogx_arrays_compile_list(uint8_t gxmode, int count, bool loop,
+                                        int (*index_cb)(int i, void *data),
+                                        void *cb_data, bool add_normal,
+                                        bool add_colors);
+/* Vertex descriptors, formats and arrays of the list's attributes */
+void _ogx_arrays_list_setup(const OgxListArrays *list);
+void *_ogx_arrays_list_dl(const OgxListArrays *list, uint32_t *size);
+/* Callers make sure the GPU is done with the list */
+void _ogx_arrays_free_list(OgxListArrays *list);
+
 /* Frees a list of index ranges/display lists of an element buffer */
 void _ogx_arrays_drop_index_lists(void *lists);
 void _ogx_arrays_draw_indexed_elements(const OgxDrawData *draw_data,
