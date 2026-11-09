@@ -894,7 +894,14 @@ void glLightfv(GLenum light, GLenum pname, const GLfloat *params)
     }
     switch (pname) {
     case GL_SPOT_DIRECTION:
-        floatcpy(glparamstate.lighting.lights[lnum].spot_direction, params, 3);
+        {
+            /* Eye space, by the modelview's upper 3x3 at the time of the call */
+            Mtx *m = &glparamstate.modelview_matrix;
+            float *d = glparamstate.lighting.lights[lnum].spot_direction;
+            for (int r = 0; r < 3; r++)
+                d[r] = (*m)[r][0] * params[0] + (*m)[r][1] * params[1] +
+                       (*m)[r][2] * params[2];
+        }
         break;
     case GL_POSITION:
         if (params[3] == 0) {
@@ -2144,20 +2151,38 @@ static LightMasks prepare_lighting()
                 GX_InitLightColor(gx_specular, spec_col);
             }
         } else {
-            // Point light
+            /* Point light, or a spotlight: GX's angle attenuation
+             * max(0, a0 + a1 c + a2 c^2) of c = the cosine between the spot
+             * axis and the light-to-vertex direction, as 1 - ((1 - c) /
+             * (1 - cos(cutoff)))^2: 1 on the axis, 0 at the cutoff and
+             * outside. GL's exponent shapes the cone inside; GX has one
+             * quadratic, so the exponent is not drawn. */
+            float a[3] = { 1, 0, 0 };
+            float dir[3] = { 0, -1, 0 };
+            const float cutoff = glparamstate.lighting.lights[i].spot_cutoff;
+            if (cutoff < 180.0f) {
+                float w = 1.0f - cosf(cutoff * (float)M_PI / 180.0f);
+                if (w < 1e-3f) w = 1e-3f;
+                a[0] = 1.0f - 1.0f / (w * w);
+                a[1] = 2.0f / (w * w);
+                a[2] = -1.0f / (w * w);
+                for (int k = 0; k < 3; k++)
+                    dir[k] = glparamstate.lighting.lights[i].spot_direction[k];
+                normalize(dir);
+            }
             if (gx_ambient) {
-                GX_InitLightAttn(gx_ambient, 1, 0, 0,
+                GX_InitLightAttn(gx_ambient, a[0], a[1], a[2],
                                  glparamstate.lighting.lights[i].atten[0],
                                  glparamstate.lighting.lights[i].atten[1],
                                  glparamstate.lighting.lights[i].atten[2]);
-                GX_InitLightDir(gx_ambient, 0, -1, 0);
+                GX_InitLightDir(gx_ambient, dir[0], dir[1], dir[2]);
             }
             if (gx_diffuse) {
-                GX_InitLightAttn(gx_diffuse, 1, 0, 0,
+                GX_InitLightAttn(gx_diffuse, a[0], a[1], a[2],
                                  glparamstate.lighting.lights[i].atten[0],
                                  glparamstate.lighting.lights[i].atten[1],
                                  glparamstate.lighting.lights[i].atten[2]);
-                GX_InitLightDir(gx_diffuse, 0, -1, 0);
+                GX_InitLightDir(gx_diffuse, dir[0], dir[1], dir[2]);
             }
         }
 

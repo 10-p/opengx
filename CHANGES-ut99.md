@@ -173,6 +173,17 @@ triangles, 5112 vertices of 44 bytes: position, normal, RGBA8 colour, two textur
   lights' own ambient and the specular term (GX has two colour channels).
 - Check: `l.emission` (emission + global ambient + one directional light, and with the light off; within 2).
 
+### Spotlights
+- Upstream drew every positional light as a point light (`GL_SPOT_CUTOFF` and `GL_SPOT_DIRECTION` were stored
+  and not used; "FIXME: Need to consider spotlights"), so a spotlight lit everything around it.
+- Now `GL_SPOT_DIRECTION` is taken to eye space by the modelview's upper 3x3 at the call, as GL says, and a
+  light with a cutoff below 180 gets GX's angle attenuation `max(0, a0 + a1 c + a2 c^2)` (c: the cosine
+  between the spot axis and the light-to-vertex direction; the axis goes to `GX_InitLightDir` as given) with
+  `1 - ((1 - c) / (1 - cos cutoff))^2`: 1 on the axis, 0 at the cutoff and outside. GX has one quadratic, so
+  `GL_SPOT_EXPONENT` does not shape the cone.
+- Check: `p.lighting` (30 degree spot 100 above the surface: lit on its axis, dark 63 degrees off it, dark
+  pointing away; the same position as a point light: 1 and 0.447). Lighting is per vertex, as in GL.
+
 ### The global ambient without a light's own ambient
 - **Upstream bug:** without a colour array (or with `GL_COLOR_MATERIAL` off), channel 0 computes
   `material register * (global ambient + ambient/specular lights)`, and the register held the *specular*
