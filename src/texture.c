@@ -361,6 +361,8 @@ void glTexGenfv(GLenum coord, GLenum pname, const GLfloat *params)
             floatcpy(tu->texture_eye_plane_s, params, 4);
         } else if (coord == GL_T) {
             floatcpy(tu->texture_eye_plane_t, params, 4);
+        } else if (coord == GL_R) {
+            floatcpy(tu->texture_eye_plane_r, params, 4);
         }
         break;
     case GL_OBJECT_PLANE:
@@ -368,6 +370,8 @@ void glTexGenfv(GLenum coord, GLenum pname, const GLfloat *params)
             floatcpy(tu->texture_object_plane_s, params, 4);
         } else if (coord == GL_T) {
             floatcpy(tu->texture_object_plane_t, params, 4);
+        } else if (coord == GL_R) {
+            floatcpy(tu->texture_object_plane_r, params, 4);
         }
         break;
     }

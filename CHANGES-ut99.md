@@ -70,6 +70,19 @@ sent upstream on its own. Licence unchanged (BSD-3-Clause, see the file headers)
   `glGetIntegerv(GL_MAX_LIGHTS)` answers 4 (it answered nothing).
 - Check: `l.emission` (GL_MAX_LIGHTS, GL_LIGHT5/GL_LIGHT7 rejected).
 
+## Texture coordinates
+
+### Linear texture generation of r, through the texture matrix
+- **Upstream gap:** `GL_EYE_LINEAR`/`GL_OBJECT_LINEAR` generated (s, t) with a 2x4 matrix (the R plane was not
+  even stored), so the texture matrix's third column met a constant 1 instead of r. A D3D-style camera-space
+  texture coordinate (`D3DTSS_TCI_CAMERASPACEPOSITION` + a texture transform mapping eye x, y, z to u, v: UE2's
+  terrain layers and projectors) lost the eye depth: radial streaks on terrain.
+- Now the generation is a 3x4 matrix of the S, T and R planes (R only with `GL_TEXTURE_GEN_R`, else 0), and the
+  texture matrix is the post-transform with its third row (0, 0, 0, 1), so the projective divide is by 1.
+  `glTexGen(GL_R, GL_EYE_PLANE/GL_OBJECT_PLANE)` is stored. Not done: the Q plane and a projective texture
+  matrix (opengx keeps 3x4 texture matrices).
+- Check: `m.texgen` (eye depth as s through the texture matrix, two depths, two texels).
+
 ## Textures
 
 ### `GL_EXT_paletted_texture` → `GX_TF_CI8` + TLUT

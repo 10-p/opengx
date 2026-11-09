@@ -48,23 +48,40 @@ static void setup_texture_gen(const OgxTextureUnit *tu, u8 tex_coord,
     u32 matrix_src = GX_IDENTITY;
     switch (tu->gen_mode) {
     case GL_OBJECT_LINEAR:
-        input_type = GX_TG_POS;
-        matrix_src = GX_TEXMTX0 + ogx_gpu_resources->texmtx_first++ * 3;
-        set_gx_mtx_rowv(0, m, tu->texture_object_plane_s);
-        set_gx_mtx_rowv(1, m, tu->texture_object_plane_t);
-        set_gx_mtx_row(2, m, 0.0f, 0.0f, 1.0f, 0.0f);
-        GX_LoadTexMtxImm(m, matrix_src, GX_MTX2x4);
-        break;
     case GL_EYE_LINEAR:
+        /* (s, t, r) from the planes, r only with GL_TEXTURE_GEN_R (else 0,
+         * the texture coordinate's default), then the texture matrix as the
+         * post-transform, whose third row keeps the projection divisor at 1:
+         * the matrix's r column then applies to r, as in OpenGL (a 2x4
+         * generation would hand the texture matrix a constant 1 there). */
         input_type = GX_TG_POS;
         matrix_src = GX_TEXMTX0 + ogx_gpu_resources->texmtx_first++ * 3;
-        Mtx eye_plane;
-        set_gx_mtx_rowv(0, eye_plane, tu->texture_eye_plane_s);
-        set_gx_mtx_rowv(1, eye_plane, tu->texture_eye_plane_t);
-        set_gx_mtx_row(2, eye_plane, 0.0f, 0.0f, 1.0f, 0.0f);
-        guMtxConcat(eye_plane, glparamstate.modelview_matrix, m);
-        GX_LoadTexMtxImm(m, matrix_src, GX_MTX2x4);
-        break;
+        bool eye = tu->gen_mode == GL_EYE_LINEAR;
+        Mtx plane;
+        set_gx_mtx_rowv(0, plane, eye ? tu->texture_eye_plane_s :
+                        tu->texture_object_plane_s);
+        set_gx_mtx_rowv(1, plane, eye ? tu->texture_eye_plane_t :
+                        tu->texture_object_plane_t);
+        if (tu->gen_enabled & OGX_TEXGEN_R)
+            set_gx_mtx_rowv(2, plane, eye ? tu->texture_eye_plane_r :
+                            tu->texture_object_plane_r);
+        else
+            set_gx_mtx_row(2, plane, 0.0f, 0.0f, 0.0f, 0.0f);
+        if (eye)
+            guMtxConcat(plane, glparamstate.modelview_matrix, m);
+        else
+            memcpy(m, plane, sizeof(Mtx));
+        GX_LoadTexMtxImm(m, matrix_src, GX_MTX3x4);
+
+        Mtx post;
+        memcpy(post, tu->matrix[tu->matrix_index], 8 * sizeof(float));
+        post[2][0] = post[2][1] = post[2][2] = 0.0f;
+        post[2][3] = 1.0f;
+        DCStoreRange(post, sizeof(post));
+        GX_LoadTexMtxImm(post, texture_matrix, GX_MTX3x4);
+        GX_SetTexCoordGen2(tex_coord, GX_TG_MTX3x4, input_type, matrix_src,
+                           FALSE, texture_matrix);
+        return;
     case GL_REFLECTION_MAP:
     case GL_SPHERE_MAP:
         input_type = GX_TG_NRM;

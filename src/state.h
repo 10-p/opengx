@@ -130,8 +130,10 @@ typedef struct {
     int glcurtex;
     float texture_eye_plane_s[4];
     float texture_eye_plane_t[4];
+    float texture_eye_plane_r[4];
     float texture_object_plane_s[4];
     float texture_object_plane_t[4];
+    float texture_object_plane_r[4];
     OgxArrayReader *array_reader;
     /* There should be 4 of these (for S, T, R, Q) but GX uses a single
      * transformation for all of them */
