@@ -149,6 +149,17 @@ triangles, 5112 vertices of 44 bytes: position, normal, RGBA8 colour, two textur
   with direct data, of `glBegin`/`glEnd`), unlit and lit: the same pixels as the arrays drawn directly (the
   unlit ones failed before).
 
+### In the engines (Dolphin, emulated time; the same engine builds with only the fork changed)
+- UC2 (UC2GLDrv fixed-function, static streams in buffer objects, dynamic ones as client arrays): DM-Decay
+  pre-match camera 19.1 -> 54.0 fps, the device's frame time 55.9 -> 18.5 ms (194 draws, 127.8k primitives per
+  frame in both); a 60 s bot match 21.3 -> 50.4 fps (frame time 44-59 -> 18-22 ms). The pre-match frame is the
+  same picture (mean difference 0.7/255, the random bot names and portraits).
+- UT99 (NOpenGLDrv, float-colour client arrays and glDrawElements per batch): at the 60 fps cap already; DM-Morbias
+  60 s 3469 -> 3506 frames, CityIntro (volumetric lighting, CPU-bound in Render) 1001 -> 1015 frames in its 10-30 s
+  window. Frames the same (the first 300 identical; later ones differ by animation timing).
+- Memory: the ring is 1 MB (allocated at the first client-array draw), index display lists at most 2 MB (UC2
+  DM-Decay: heap +0.3-1.4 MB at the same points).
+
 ## Lighting
 
 ### `GL_COLOR_MATERIAL` with `GL_EMISSION` and a colour array
