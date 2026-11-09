@@ -77,6 +77,16 @@ static int calc_original_size(int level, int s)
     return s;
 }
 // Given w,h,level,and bpp, returns the offset to the mipmap at level "level"
+uint32_t _ogx_texture_level_offset(int level, int w, int h, uint32_t format)
+{
+    return GX_GetTexBufferSize(w, h, size_format(format), GX_TRUE, level);
+}
+
+uint32_t _ogx_texture_level_size(int w, int h, uint32_t format)
+{
+    return calc_memory(w, h, format);
+}
+
 static uint32_t calc_mipmap_offset(int level, int w, int h, uint32_t format)
 {
     return GX_GetTexBufferSize(w, h, size_format(format), GX_TRUE, level);
@@ -485,9 +495,9 @@ static void update_texture(const void *data, int level, GLenum format, GLenum ty
 /* Make sure the current texture has a texel buffer able to hold the given
  * mipmap level with the given GX format, (re)allocating it if needed, and
  * fill "ti" with the resulting texture information. */
-static bool texture_prepare_storage(GXTexObj *texobj, GLint level,
-                                    int width, int height, uint8_t gx_format,
-                                    OgxTextureInfo *ti)
+bool _ogx_texture_prepare_storage(GXTexObj *texobj, GLint level,
+                                  int width, int height, uint8_t gx_format,
+                                  OgxTextureInfo *ti)
 {
     // We *may* need to delete and create a new texture, depending if the user wants to add some mipmap levels
     // or wants to create a new texture from scratch
@@ -505,6 +515,7 @@ static bool texture_prepare_storage(GXTexObj *texobj, GLint level,
     }
     ti->format = gx_format;
     ti->ud.d.is_alpha = is_alpha;
+    ti->ud.d.is_opaque = 0;
     ti->ud.d.is_reserved = 1;
     char onelevel = ti->minlevel == 0 && ti->maxlevel == 0;
 
@@ -567,7 +578,7 @@ static bool texture_prepare_storage(GXTexObj *texobj, GLint level,
 }
 
 /* Write the texture information back into the GX texture object */
-static void texture_commit(GXTexObj *texobj, const OgxTextureInfo *ti)
+void _ogx_texture_commit(GXTexObj *texobj, const OgxTextureInfo *ti)
 {
     if (ti->format == GX_TF_CI8) {
         /* The TLUT name is assigned when the texture is bound to a stage,
@@ -615,7 +626,8 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
     }
 
     OgxTextureInfo ti;
-    if (!texture_prepare_storage(texobj, level, width, height, gx_format, &ti))
+    if (!_ogx_texture_prepare_storage(texobj, level, width, height, gx_format,
+                                      &ti))
         return;
 
     if (data) {
@@ -623,7 +635,7 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
                        texobj, &ti, 0, 0);
     }
 
-    texture_commit(texobj, &ti);
+    _ogx_texture_commit(texobj, &ti);
 }
 
 void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,

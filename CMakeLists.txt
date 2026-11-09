@@ -62,6 +62,7 @@ add_library(${TARGET} STATIC
     src/texel.h
     src/texture.c
     src/texture.h
+    src/texture_compressed.c
     src/texture_gen_sw.c
     src/texture_gen_sw.h
     src/texture_unit.c

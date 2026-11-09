@@ -49,6 +49,10 @@ typedef union {
     struct {
         unsigned is_reserved: 1;
         unsigned is_alpha: 1;
+        /* The texture alpha must read as 1.0 even where the GX texture has
+         * transparent texels (GL_COMPRESSED_RGB_S3TC_DXT1_EXT stored as
+         * CMPR). Handled when setting up the TEV. */
+        unsigned is_opaque: 1;
     } d;
 } OgxTextureUserData;
 
@@ -78,6 +82,17 @@ typedef struct {
 
 bool _ogx_texture_get_info(GLuint texture_name, OgxTextureInfo *info);
 bool _ogx_texture_get_texobj(GLuint texture_name, GXTexObj *texobj);
+
+/* Used by glTexImage2D-like functions: make sure the texel buffer of the
+ * texture can hold the given level, then commit the info to the GX object. */
+bool _ogx_texture_prepare_storage(GXTexObj *texobj, GLint level,
+                                  int width, int height, uint8_t gx_format,
+                                  OgxTextureInfo *ti);
+void _ogx_texture_commit(GXTexObj *texobj, const OgxTextureInfo *ti);
+/* Byte offset of a mipmap level in the texel buffer, and size of a level,
+ * correct for GX_TF_CI8 too. "w" and "h" are the size of level 0. */
+uint32_t _ogx_texture_level_offset(int level, int w, int h, uint32_t format);
+uint32_t _ogx_texture_level_size(int w, int h, uint32_t format);
 
 #ifdef __cplusplus
 } // extern C

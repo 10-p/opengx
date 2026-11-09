@@ -31,6 +31,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include "debug.h"
 #include "gpu_resources.h"
+#include "texture.h"
 #include "texture_gen_sw.h"
 #include "tlut.h"
 #include "utils.h"
@@ -92,7 +93,8 @@ typedef struct {
 
 static TevSource gl_rgbsource_to_gx(GLenum source, GLenum operand,
                                     u8 prev_rgb, u8 prev_alpha,
-                                    u8 raster_rgb, u8 raster_alpha)
+                                    u8 raster_rgb, u8 raster_alpha,
+                                    bool tex_opaque)
 {
     TevSource ret = { GX_CC_ZERO, false };
     if (operand == GL_ONE_MINUS_SRC_COLOR) {
@@ -107,7 +109,9 @@ static TevSource gl_rgbsource_to_gx(GLenum source, GLenum operand,
     case GL_TEXTURE:
         switch (operand) {
         case GL_SRC_COLOR: ret.source = GX_CC_TEXC; break;
-        case GL_SRC_ALPHA: ret.source = GX_CC_TEXA; break;
+        case GL_SRC_ALPHA:
+            ret.source = tex_opaque ? GX_CC_ONE : GX_CC_TEXA;
+            break;
         }
         break;
     case GL_PREVIOUS:
@@ -127,8 +131,13 @@ static TevSource gl_rgbsource_to_gx(GLenum source, GLenum operand,
     return ret;
 }
 
+/* Sentinel for "constant 1" in the alpha channel; compute_tev_input()
+ * turns it into the stage konst alpha set to 1 */
+#define CA_ONE 0xa1
+
 static TevSource gl_alphasource_to_gx(GLenum source, GLenum operand,
-                                      u8 prev_alpha, u8 raster_alpha)
+                                      u8 prev_alpha, u8 raster_alpha,
+                                      bool tex_opaque)
 {
     TevSource ret = { GX_CA_ZERO, false };
     /* For the alpha channel, operand can only be either GL_SRC_ALPHA or
@@ -138,7 +147,7 @@ static TevSource gl_alphasource_to_gx(GLenum source, GLenum operand,
     }
 
     switch (source) {
-    case GL_TEXTURE: ret.source = GX_CA_TEXA; break;
+    case GL_TEXTURE: ret.source = tex_opaque ? CA_ONE : GX_CA_TEXA; break;
     case GL_PREVIOUS: ret.source = prev_alpha; break;
     case GL_CONSTANT: ret.source = GX_CA_KONST; break;
     case GL_PRIMARY_COLOR: ret.source = raster_alpha; break;
@@ -168,8 +177,6 @@ static TevInput compute_tev_input(GLenum combine_func, u8 stage, GXColor color,
     };
     int used_args = 0;
 
-    const int CA_ONE = 0xa1; /* sentinel value, we won't actually store this in
-                                the TEV registers */
     u8 zero_value, one_value, konst_value;
     if (is_alpha) {
         zero_value = GX_CA_ZERO;
@@ -355,7 +362,8 @@ static TevInput compute_tev_input(GLenum combine_func, u8 stage, GXColor color,
 
 static void setup_combine_operation(const OgxTextureUnit *te, u8 stage,
                                     u8 prev_rgb, u8 prev_alpha,
-                                    u8 raster_rgb, u8 raster_alpha)
+                                    u8 raster_rgb, u8 raster_alpha,
+                                    bool tex_opaque)
 {
     TevSource source_rgb[3];
     TevSource source_alpha[3];
@@ -364,10 +372,12 @@ static void setup_combine_operation(const OgxTextureUnit *te, u8 stage,
         source_rgb[i] = gl_rgbsource_to_gx(te->source_rgb[i],
                                            te->operand_rgb[i],
                                            prev_rgb, prev_alpha,
-                                           raster_rgb, raster_alpha);
+                                           raster_rgb, raster_alpha,
+                                           tex_opaque);
         source_alpha[i] = gl_alphasource_to_gx(te->source_alpha[i],
                                                te->operand_alpha[i],
-                                               prev_alpha, raster_alpha);
+                                               prev_alpha, raster_alpha,
+                                               tex_opaque);
     }
 
     TevInput rgb = compute_tev_input(te->combine_rgb, stage, te->color,
@@ -392,17 +402,27 @@ static void setup_texture_stage(const OgxTextureUnit *tu,
                                 u8 raster_rgb, u8 raster_alpha,
                                 u8 channel)
 {
+    gltexture_ *texture = &texture_list[tu->glcurtex];
+    /* For textures whose alpha must be ignored, read it as the stage konst
+     * alpha, set to 1. None of the non-combine modes below uses a konst. */
+    bool tex_opaque = TEXTURE_USER_DATA(&texture->texobj).d.is_opaque;
+    u8 texa = GX_CA_TEXA;
+    if (tex_opaque && tu->mode != GL_COMBINE) {
+        texa = GX_CA_KONST;
+        GX_SetTevKAlphaSel(stage, GX_TEV_KASEL_1);
+    }
+
     switch (tu->mode) {
     case GL_REPLACE:
         // In data: a: Texture Color
         GX_SetTevColorIn(stage, GX_CC_TEXC, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO);
-        GX_SetTevAlphaIn(stage, GX_CA_TEXA, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO);
+        GX_SetTevAlphaIn(stage, texa, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO);
         break;
     case GL_ADD:
         /* In data: d: Texture Color a: raster value, Operation: a+d
          * Alpha gets multiplied. */
         GX_SetTevColorIn(stage, prev_rgb, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC);
-        GX_SetTevAlphaIn(stage, GX_CA_ZERO, prev_alpha, GX_CA_TEXA, GX_CA_ZERO);
+        GX_SetTevAlphaIn(stage, GX_CA_ZERO, prev_alpha, texa, GX_CA_ZERO);
         break;
     case GL_BLEND:
         /* In data: c: Texture Color, a: raster value, b: tex env
@@ -410,17 +430,17 @@ static void setup_texture_stage(const OgxTextureUnit *tu,
          * Until we implement GL_TEXTURE_ENV_COLOR, use white (GX_CC_ONE) for
          * the tex env color. */
         GX_SetTevColorIn(stage, prev_rgb, GX_CC_ONE, GX_CC_TEXC, GX_CC_ZERO);
-        GX_SetTevAlphaIn(stage, GX_CA_ZERO, prev_alpha, GX_CA_TEXA, GX_CA_ZERO);
+        GX_SetTevAlphaIn(stage, GX_CA_ZERO, prev_alpha, texa, GX_CA_ZERO);
         break;
     case GL_COMBINE:
         setup_combine_operation(tu, stage, prev_rgb, prev_alpha,
-                                raster_rgb, raster_alpha);
+                                raster_rgb, raster_alpha, tex_opaque);
         break;
     case GL_MODULATE:
     default:
         // In data: c: Texture Color b: raster value, Operation: b*c
         GX_SetTevColorIn(stage, GX_CC_ZERO, prev_rgb, GX_CC_TEXC, GX_CC_ZERO);
-        GX_SetTevAlphaIn(stage, GX_CA_ZERO, prev_alpha, GX_CA_TEXA, GX_CA_ZERO);
+        GX_SetTevAlphaIn(stage, GX_CA_ZERO, prev_alpha, texa, GX_CA_ZERO);
         break;
     }
     if (tu->mode != GL_COMBINE) {
@@ -434,7 +454,6 @@ static void setup_texture_stage(const OgxTextureUnit *tu,
     bool points_enabled = glparamstate.point_sprites_enabled &&
         glparamstate.point_sprites_coord_replace;
     GX_EnableTexOffsets(tex_coord, GX_DISABLE, points_enabled);
-    gltexture_ *texture = &texture_list[tu->glcurtex];
     if (GX_GetTexObjFmt(&texture->texobj) == GX_TF_CI8) {
         /* Colour-index textures cannot interpolate between mipmap levels
          * (GX hardware limitation): fall back to the nearest level. */

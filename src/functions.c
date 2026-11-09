@@ -101,6 +101,8 @@ static const OgxProcMap s_proc_map[] = {
     PROC(glColorPointer),
     PROC(glColorSubTableEXT), /* GL_EXT_paletted_texture */
     PROC(glColorTableEXT), /* GL_EXT_paletted_texture */
+    PROC(glCompressedTexImage2D), /* OpenGL 1.3 */
+    PROC(glCompressedTexSubImage2D), /* OpenGL 1.3 */
     PROC(glCopyPixels),
     //PROC(glCopyTexImage1D),
     //PROC(glCopyTexImage2D),

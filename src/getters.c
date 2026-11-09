@@ -44,7 +44,8 @@ static const GLubyte gl_null_string[1] = { 0 };
 static GLubyte s_extension_string[] =
     "GL_ARB_multitexture "
     "GL_ARB_vertex_buffer_object "
-    "GL_EXT_paletted_texture ";
+    "GL_EXT_paletted_texture "
+    "GL_EXT_texture_compression_s3tc ";
 
 static int prepare_extension_strings()
 {

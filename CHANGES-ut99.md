@@ -54,3 +54,24 @@ sent upstream on its own. Licence unchanged (BSD-3-Clause, see the file headers)
     whole level. (Invisible in Dolphin, which does not emulate the data cache.)
   - `ogx_get_proc_address()` now also strips an `EXT` suffix, and first looks the name up unchanged (for
     functions that only exist with the suffix, like `glColorTableEXT`).
+
+### `GL_EXT_texture_compression_s3tc` (DXT1 only) → `GX_TF_CMPR`
+- New: `glCompressedTexImage2D` / `glCompressedTexSubImage2D` (also reachable as `...ARB`) for
+  `GL_COMPRESSED_RGB_S3TC_DXT1_EXT` and `GL_COMPRESSED_RGBA_S3TC_DXT1_EXT`, any level (levels smaller than
+  8x8 go into one padded 32-byte tile). `imageSize` must be exactly `ceil(w/4)*ceil(h/4)*8`
+  (else `GL_INVALID_VALUE`). Sub-images must be 4-aligned.
+- **DXT3 and DXT5 → `GL_INVALID_ENUM`**: GX has no explicit/interpolated alpha block format (CMPR is DXT1
+  only). The extension string is advertised anyway because DXT1 is what matters; applications must not assume
+  DXT3/5 work.
+- Repacking (CPU, ~a memcpy): the 8-byte blocks are reordered from raster order into 32-byte CMPR tiles of 2x2
+  blocks (top-left, top-right, bottom-left, bottom-right; tiles in raster order); the two RGB565 endpoint
+  colours are byte-swapped to big-endian; in each of the four index bytes (one per texel row) the four 2-bit
+  indices are mirrored, because DXT1 keeps the leftmost texel in the low bits and CMPR in the high bits. Index
+  meanings and the `c0 <= c1` three-colour + transparent mode are the same. Verified texel by texel
+  (16x16 texture with a distinct index pattern per block, and a black/white block).
+- Decode differences GX vs the S3TC spec (measured in Dolphin, to confirm on hardware): the 4-colour mode
+  interpolates with 5/8 + 3/8 weights instead of 2/3 + 1/3 (white/black → 159 and 95 instead of 170 and 85),
+  and in 3-colour mode the transparent texel keeps the `(c0+c1)/2` colour instead of black.
+- `GL_COMPRESSED_RGB_S3TC_DXT1_EXT` must not have transparent texels: the texture is flagged `is_opaque` and
+  the TEV setup reads that unit's texture alpha as a konst 1.0 (`GX_TEV_KASEL_1`) in every env mode, including
+  `GL_COMBINE` sources. The colour of such texels is still `(c0+c1)/2`, not black (GX limitation).
