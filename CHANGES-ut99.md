@@ -173,6 +173,15 @@ triangles, 5112 vertices of 44 bytes: position, normal, RGBA8 colour, two textur
   lights' own ambient and the specular term (GX has two colour channels).
 - Check: `l.emission` (emission + global ambient + one directional light, and with the light off; within 2).
 
+### The global ambient without a light's own ambient
+- **Upstream bug:** without a colour array (or with `GL_COLOR_MATERIAL` off), channel 0 computes
+  `material register * (global ambient + ambient/specular lights)`, and the register held the *specular*
+  material colour unless some light had an ambient colour. GL lights have none by default, so the global
+  ambient (`GL_LIGHT_MODEL_AMBIENT`) was multiplied by the specular colour, black by default: meshes lit by
+  ambient and lights drew only the lights (UT2004's first-person weapon was black). The register now holds the
+  ambient material colour whenever the global ambient is not black.
+- Check: `p.lighting` (global ambient 0.4, material ambient 1, no light: 102).
+
 ### Eight lights
 - **Upstream bug (memory):** `glLightf`/`glLightfv` indexed the light table with `light - GL_LIGHT0` unchecked,
   so `GL_LIGHT4..7` wrote past the 4-entry table into the GX light objects.

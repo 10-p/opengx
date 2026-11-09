@@ -2454,7 +2454,8 @@ bool _ogx_setup_render_stages()
              * combines with the specular light. But we also need this register
              * for the ambient color, which is arguably more important, so we
              * give it higher priority. */
-            if (light_mask.ambient_mask) {
+            if (light_mask.ambient_mask ||
+                !is_black(glparamstate.lighting.globalambient)) {
                 GX_SetChanMatColor(GX_COLOR0A0, acol);
             } else {
                 GX_SetChanMatColor(GX_COLOR0A0, scol);
