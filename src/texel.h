@@ -185,15 +185,24 @@ struct TexelIA8: public Texel16 {
     }
 };
 
+/* An 8-bit channel to the nearest 5-, 6- or 4-bit GX level (GX expands a level
+ * by repeating its high bits, so a value that came from a level gives it back) */
+static inline unsigned to_5bit(unsigned v) { return (v * 31 + 127) / 255; }
+static inline unsigned to_6bit(unsigned v) { return (v * 63 + 127) / 255; }
+static inline unsigned to_4bit(unsigned v) { return (v * 15 + 127) / 255; }
+
+static inline uint16_t encode_rgb565(uint8_t r, uint8_t g, uint8_t b)
+{
+    return (to_5bit(r) << 11) | (to_6bit(g) << 5) | to_5bit(b);
+}
+
 struct TexelRGB565: public Texel16 {
     static constexpr bool has_alpha = false;
     static constexpr bool has_rgb = true;
 
     TexelRGB565() = default;
     void set_color(uint8_t r, uint8_t g, uint8_t b) {
-        setWord(((r & 0xf8) << 8) |
-                ((g & 0xfc) << 3) |
-                ((b & 0xf8) >> 3));
+        setWord(encode_rgb565(r, g, b));
     }
 
     void set_color(GXColor c) override { set_color(c.r, c.g, c.b); }
@@ -225,9 +234,9 @@ struct TexelRGB5A3: public Texel16 {
     void set_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
         int a3 = (a * 7 + 127) / 255;
         if (a3 == 7) {
-            setWord(0x8000 | ((r & 0xf8) << 7) | ((g & 0xf8) << 2) | (b >> 3));
+            setWord(0x8000 | (to_5bit(r) << 10) | (to_5bit(g) << 5) | to_5bit(b));
         } else {
-            setWord((a3 << 12) | ((r & 0xf0) << 4) | (g & 0xf0) | (b >> 4));
+            setWord((a3 << 12) | (to_4bit(r) << 8) | (to_4bit(g) << 4) | to_4bit(b));
         }
     }
 

@@ -317,8 +317,7 @@ void _ogx_bytes_to_texture(const void *data, GLenum format, GLenum type,
                 const uint8_t *s = src + ry * src_pitch;
                 if (gx_format == GX_TF_RGB565) {
                     for (int rx = 0; rx < width; rx++, s += 3) {
-                        row[rx] = ((s[0] & 0xf8) << 8) | ((s[1] & 0xfc) << 3) |
-                            (s[2] >> 3);
+                        row[rx] = encode_rgb565(s[0], s[1], s[2]);
                     }
                 } else {
                     TexelRGB5A3 t;

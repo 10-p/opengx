@@ -358,6 +358,10 @@ Level sizes: `ceil(w/tw) * ceil(h/th) * 32` bytes (`*64` for RGBA8), with `tw x 
   compressor on RGBA data: corrupt texture. 1-bit alpha is exact; 4-bit alpha keeps 3 bits; texels whose alpha
   rounds to 7/7 get 5-bit colour, the others 4-bit. (So `GL_RGB5_A1` with a source alpha of e.g. 200 is stored
   translucent 5/7 instead of opaque.)
+- RGB565 and RGB5A3 texel stores (every converting path: RGB/RGBA bytes, decoded DXT3/DXT5) round each channel
+  to the nearest 5-, 6- or 4-bit level, `(v * (2^n - 1) + 127) / 255`; upstream kept the high bits, which
+  darkened every texel by half a level on average (4-bit translucent texels: up to 17). A value that came from
+  a level (GX expands by repeating the high bits) keeps it. Palettes (TLUT entries) keep the high bits.
 - Sized luminance / luminance-alpha / intensity / alpha formats (`GL_LUMINANCE8`, `GL_LUMINANCE8_ALPHA8`,
   `GL_INTENSITY8`, `GL_ALPHA8`, … and the component counts 1 and 2) map to I8 / IA8 / I8 / A8 instead of CMPR.
 - `GL_UNSIGNED_SHORT_5_5_5_1` (and every packed type with components narrower than 4 bits) expanded the
