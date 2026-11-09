@@ -36,6 +36,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "debug.h"
 #include "image_DXT.h"
 #include "pixels.h"
+#include "tlut.h"
 #include "state.h"
 #include "utils.h"
 
@@ -47,15 +48,24 @@ static inline int curr_tex()
     return glparamstate.texture_unit[unit].glcurtex;
 }
 
+/* libogc 3.2.1's GX_GetTexBufferSize() computes GX_TF_CI8 sizes as if it
+ * were a 16-bit format (8x4 tiles are right, 4x4 is what it uses): that
+ * doubles the buffer and, worse, gives wrong mipmap offsets. CI8 has the same
+ * layout as I8, so compute it as such. */
+static inline uint32_t size_format(uint32_t format)
+{
+    return format == GX_TF_CI8 ? GX_TF_I8 : format;
+}
+
 static uint32_t calc_memory(int w, int h, uint32_t format)
 {
-    return GX_GetTexBufferSize(w, h, format, GX_FALSE, 0);
+    return GX_GetTexBufferSize(w, h, size_format(format), GX_FALSE, 0);
 }
 
 // Returns the number of bytes required to store a texture with all its bitmaps
 static uint32_t calc_tex_size(int w, int h, uint32_t format)
 {
-    return GX_GetTexBufferSize(w, h, format, GX_TRUE, 20);
+    return GX_GetTexBufferSize(w, h, size_format(format), GX_TRUE, 20);
 }
 // Deduce the original texture size given the current size and level
 static int calc_original_size(int level, int s)
@@ -69,7 +79,7 @@ static int calc_original_size(int level, int s)
 // Given w,h,level,and bpp, returns the offset to the mipmap at level "level"
 static uint32_t calc_mipmap_offset(int level, int w, int h, uint32_t format)
 {
-    return GX_GetTexBufferSize(w, h, format, GX_TRUE, level);
+    return GX_GetTexBufferSize(w, h, size_format(format), GX_TRUE, level);
 }
 
 static u8 gl_filter_to_gx(GLint gl_filter)
@@ -458,12 +468,120 @@ static void update_texture(const void *data, int level, GLenum format, GLenum ty
                                        width, height, needswap);
     }
 
-    DCFlushRange(dst_addr, calc_memory(width, height, ti->format));
+    /* Flush the whole level: a sub-image is scattered over all of it in the
+     * tiled layout (upstream flushed only width*height bytes from the start
+     * of the level, which misses the data of sub-images not at the origin;
+     * invisible in Dolphin, which doesn't emulate the data cache). */
+    DCFlushRange(dst_addr, calc_memory(ti->width >> level ? ti->width >> level : 1,
+                                       ti->height >> level ? ti->height >> level : 1,
+                                       ti->format));
 
     // Slow but necessary! The new textures may be in the same region of some old cached textures
     GX_InvalidateTexAll();
 
     glparamstate.dirty.bits.dirty_tev = 1;
+}
+
+/* Make sure the current texture has a texel buffer able to hold the given
+ * mipmap level with the given GX format, (re)allocating it if needed, and
+ * fill "ti" with the resulting texture information. */
+static bool texture_prepare_storage(GXTexObj *texobj, GLint level,
+                                    int width, int height, uint8_t gx_format,
+                                    OgxTextureInfo *ti)
+{
+    // We *may* need to delete and create a new texture, depending if the user wants to add some mipmap levels
+    // or wants to create a new texture from scratch
+    int wi = calc_original_size(level, width);
+    int he = calc_original_size(level, height);
+
+    texture_get_info(texobj, ti);
+    uint8_t old_format = ti->format == GX_TF_A8 ? GX_TF_I8 : ti->format;
+    bool is_alpha = false;
+    /* GX_TF_A8 is not supported by Dolphin and it's not properly handed by
+     * a real Wii either. */
+    if (gx_format == GX_TF_A8) {
+        gx_format = GX_TF_I8;
+        is_alpha = true; /* Remember that we wanted alpha, though */
+    }
+    ti->format = gx_format;
+    ti->ud.d.is_alpha = is_alpha;
+    ti->ud.d.is_reserved = 1;
+    char onelevel = ti->minlevel == 0 && ti->maxlevel == 0;
+
+    // Check if the texture has changed its geometry and proceed to delete it
+    // If the specified level is zero, create a onelevel texture to save memory.
+    // A format change which changes the size of the buffer also needs a new
+    // allocation (upstream reused the old buffer, overflowing it).
+    if (wi != ti->width || he != ti->height ||
+        (ti->texels && calc_memory(wi, he, old_format) !=
+         calc_memory(wi, he, gx_format))) {
+        if (ti->texels != 0)
+            free(ti->texels);
+        uint32_t required_size;
+        if (level == 0) {
+            required_size = calc_memory(width, height, ti->format);
+            onelevel = 1;
+        } else {
+            required_size = calc_tex_size(wi, he, ti->format);
+            onelevel = 0;
+        }
+        ti->texels = memalign(32, required_size);
+        if (!ti->texels) {
+            warning("Failed to allocate %u bytes for texture", required_size);
+            set_error(GL_OUT_OF_MEMORY);
+            GX_InitTexObj(texobj, NULL, 0, 0, 0, GX_REPEAT, GX_REPEAT, 0);
+            GX_InitTexObjUserData(texobj, ti->ud.ptr);
+            return false;
+        }
+        ti->minlevel = level;
+        ti->maxlevel = level;
+        ti->width = wi;
+        ti->height = he;
+    }
+    if (ti->maxlevel < level)
+        ti->maxlevel = level;
+    if (ti->minlevel > level)
+        ti->minlevel = level;
+
+    if (onelevel == 1 && level != 0) {
+        // We allocated a onelevel texture (base level 0) but now
+        // we are uploading a non-zero level, so we need to create a mipmap capable buffer
+        // and copy the level zero texture
+        uint32_t tsize = calc_memory(wi, he, ti->format);
+        unsigned char *oldbuf = ti->texels;
+
+        uint32_t required_size = calc_tex_size(wi, he, ti->format);
+        ti->texels = memalign(32, required_size);
+        if (!ti->texels) {
+            warning("Failed to allocate memory for texture mipmap (%d)", errno);
+            set_error(GL_OUT_OF_MEMORY);
+            ti->texels = oldbuf;
+            ti->maxlevel = ti->minlevel = 0;
+            return false;
+        }
+
+        memcpy(ti->texels, oldbuf, tsize);
+        free(oldbuf);
+    }
+    return true;
+}
+
+/* Write the texture information back into the GX texture object */
+static void texture_commit(GXTexObj *texobj, const OgxTextureInfo *ti)
+{
+    if (ti->format == GX_TF_CI8) {
+        /* The TLUT name is assigned when the texture is bound to a stage,
+         * see _ogx_tlut_bind() */
+        GX_InitTexObjCI(texobj, ti->texels, ti->width, ti->height, ti->format,
+                        ti->wraps, ti->wrapt, GX_TRUE, GX_TLUT0);
+    } else {
+        GX_InitTexObj(texobj, ti->texels,
+                      ti->width, ti->height, ti->format, ti->wraps, ti->wrapt,
+                      GX_TRUE);
+    }
+    GX_InitTexObjLOD(texobj, ti->min_filter, ti->mag_filter,
+                     ti->minlevel, ti->maxlevel, 0, GX_ENABLE, GX_ENABLE, GX_ANISO_1);
+    GX_InitTexObjUserData(texobj, ti->ud.ptr);
 }
 
 void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei width, GLsizei height,
@@ -491,83 +609,21 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
          */
         if (gx_format == GX_TF_CMPR) gx_format = GX_TF_RGB565;
     }
-
-    // We *may* need to delete and create a new texture, depending if the user wants to add some mipmap levels
-    // or wants to create a new texture from scratch
-    int wi = calc_original_size(level, width);
-    int he = calc_original_size(level, height);
+    if (gx_format == GX_TF_CI8 && format != GL_COLOR_INDEX) {
+        set_error(GL_INVALID_OPERATION);
+        return;
+    }
 
     OgxTextureInfo ti;
-    texture_get_info(texobj, &ti);
-    ti.format = gx_format;
-    /* GX_TF_A8 is not supported by Dolphin and it's not properly handed by
-     * a real Wii either. */
-    if (ti.format == GX_TF_A8) {
-        ti.format = gx_format = GX_TF_I8;
-        ti.ud.d.is_alpha = 1; /* Remember that we wanted alpha, though */
-    }
-
-    ti.ud.d.is_reserved = 1;
-    char onelevel = ti.minlevel == 0 && ti.maxlevel == 0;
-
-    // Check if the texture has changed its geometry and proceed to delete it
-    // If the specified level is zero, create a onelevel texture to save memory
-    if (wi != ti.width || he != ti.height) {
-        if (ti.texels != 0)
-            free(ti.texels);
-        uint32_t required_size;
-        if (level == 0) {
-            required_size = calc_memory(width, height, ti.format);
-            onelevel = 1;
-        } else {
-            required_size = calc_tex_size(wi, he, ti.format);
-            onelevel = 0;
-        }
-        ti.texels = memalign(32, required_size);
-        if (!ti.texels) {
-            warning("Failed to allocate %u bytes for texture", required_size);
-            set_error(GL_OUT_OF_MEMORY);
-            return;
-        }
-        ti.minlevel = level;
-        ti.maxlevel = level;
-        ti.width = wi;
-        ti.height = he;
-    }
-    if (ti.maxlevel < level)
-        ti.maxlevel = level;
-    if (ti.minlevel > level)
-        ti.minlevel = level;
-
-    if (onelevel == 1 && level != 0) {
-        // We allocated a onelevel texture (base level 0) but now
-        // we are uploading a non-zero level, so we need to create a mipmap capable buffer
-        // and copy the level zero texture
-        uint32_t tsize = calc_memory(wi, he, ti.format);
-        unsigned char *oldbuf = ti.texels;
-
-        uint32_t required_size = calc_tex_size(wi, he, ti.format);
-        ti.texels = memalign(32, required_size);
-        if (!ti.texels) {
-            warning("Failed to allocate memory for texture mipmap (%d)", errno);
-            set_error(GL_OUT_OF_MEMORY);
-            return;
-        }
-
-        memcpy(ti.texels, oldbuf, tsize);
-        free(oldbuf);
-    }
+    if (!texture_prepare_storage(texobj, level, width, height, gx_format, &ti))
+        return;
 
     if (data) {
         update_texture(data, level, format, type, width, height,
                        texobj, &ti, 0, 0);
     }
 
-    GX_InitTexObj(texobj, ti.texels,
-                  ti.width, ti.height, ti.format, ti.wraps, ti.wrapt, GX_TRUE);
-    GX_InitTexObjLOD(texobj, ti.min_filter, ti.mag_filter,
-                     ti.minlevel, ti.maxlevel, 0, GX_ENABLE, GX_ENABLE, GX_ANISO_1);
-    GX_InitTexObjUserData(texobj, ti.ud.ptr);
+    texture_commit(texobj, &ti);
 }
 
 void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
@@ -639,6 +695,8 @@ void glDeleteTextures(GLsizei n, const GLuint *textures)
             void *data = GX_GetTexObjData(&texture_list[i].texobj);
             if (data != 0)
                 free(MEM_PHYSICAL_TO_K0(data));
+            if (texture_list[i].tlut)
+                _ogx_tlut_free(texture_list[i].tlut);
             memset(&texture_list[i], 0, sizeof(texture_list[i]));
         }
     }

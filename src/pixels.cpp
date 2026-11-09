@@ -251,6 +251,26 @@ void _ogx_bytes_to_texture(const void *data, GLenum format, GLenum type,
     /* Skip degenerate cases */
     if (width <= 0 || height <= 0) return;
 
+    if (gx_format == GX_TF_CI8) {
+        /* Colour indices: just tile the bytes */
+        if (format != GL_COLOR_INDEX ||
+            (type != GL_UNSIGNED_BYTE && type != GL_BYTE)) {
+            warning("Paletted textures need GL_COLOR_INDEX/GL_UNSIGNED_BYTE "
+                    "data (got %04x/%04x)", format, type);
+            return;
+        }
+        int row_length = glparamstate.unpack_row_length > 0 ?
+            glparamstate.unpack_row_length : width;
+        int align = glparamstate.unpack_alignment;
+        int src_pitch = (row_length + align - 1) / align * align;
+        const uint8_t *src = static_cast<const uint8_t*>(data) +
+            glparamstate.unpack_skip_rows * src_pitch +
+            glparamstate.unpack_skip_pixels;
+        _ogx_tile_8bpp(src, src_pitch, width, height,
+                       static_cast<uint8_t*>(dst), x, y, dstpitch);
+        return;
+    }
+
     /* The GL_UNPACK_SKIP_ROWS and GL_UNPACK_SKIP_PIXELS can be handled here by
      * modifiying the source data pointer. */
     bool need_skip_pixels = false;
@@ -409,6 +429,42 @@ void _ogx_bytes_to_texture(const void *data, GLenum format, GLenum type,
     }
 }
 
+/* Store 8-bit texels (I8, A8, CI8) into the GX layout: tiles of 8x4 texels,
+ * 32 bytes each, one 8-byte line per texel row. "dstpitch" is the value
+ * returned by _ogx_pitch_for_width() (a quarter of a tile row). */
+void _ogx_tile_8bpp(const uint8_t *src, int src_pitch, int width, int height,
+                    uint8_t *dst, int x, int y, int dstpitch)
+{
+    const int tile_row_bytes = dstpitch * 4;
+    if (((x | width) & 7) == 0 && ((uintptr_t(src) | src_pitch) & 3) == 0) {
+        /* Fast path: whole tile lines, two 32-bit words each */
+        for (int ry = 0; ry < height; ry++) {
+            int ty = y + ry;
+            const uint32_t *s =
+                reinterpret_cast<const uint32_t*>(src + ry * src_pitch);
+            uint32_t *d = reinterpret_cast<uint32_t*>(
+                dst + (ty >> 2) * tile_row_bytes + (ty & 3) * 8 + (x >> 3) * 32);
+            for (int bx = 0; bx < width / 8; bx++) {
+                d[0] = s[0];
+                d[1] = s[1];
+                s += 2;
+                d += 8;
+            }
+        }
+        return;
+    }
+
+    for (int ry = 0; ry < height; ry++) {
+        int ty = y + ry;
+        const uint8_t *s = src + ry * src_pitch;
+        uint8_t *line = dst + (ty >> 2) * tile_row_bytes + (ty & 3) * 8;
+        for (int rx = 0; rx < width; rx++) {
+            int tx = x + rx;
+            line[(tx >> 3) * 32 + (tx & 7)] = s[rx];
+        }
+    }
+}
+
 int _ogx_pitch_for_width(uint32_t gx_format, int width)
 {
     switch (gx_format) {
@@ -419,6 +475,7 @@ int _ogx_pitch_for_width(uint32_t gx_format, int width)
         return TexelRGB565::compute_pitch(width);
     case GX_TF_I8:
     case GX_TF_A8:
+    case GX_TF_CI8:
         return TexelI8::compute_pitch(width);
     case GX_TF_I4:
         return TexelI4::compute_pitch(width);
@@ -446,6 +503,7 @@ uint8_t _ogx_gl_format_to_gx(GLenum format)
     case GL_GREEN:
     case GL_BLUE:
         return GX_TF_RGBA8;
+    case GL_COLOR_INDEX8_EXT: return GX_TF_CI8;
     case GL_LUMINANCE_ALPHA: return GX_TF_IA8;
     case GL_LUMINANCE: return GX_TF_I8;
     case GL_ALPHA:

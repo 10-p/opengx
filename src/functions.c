@@ -99,6 +99,8 @@ static const OgxProcMap s_proc_map[] = {
     PROC(glColorMask),
     PROC(glColorMaterial),
     PROC(glColorPointer),
+    PROC(glColorSubTableEXT), /* GL_EXT_paletted_texture */
+    PROC(glColorTableEXT), /* GL_EXT_paletted_texture */
     PROC(glCopyPixels),
     //PROC(glCopyTexImage1D),
     //PROC(glCopyTexImage2D),
@@ -156,6 +158,7 @@ static const OgxProcMap s_proc_map[] = {
     PROC(glGetBufferPointerv), /* OpenGL 1.5 */
     PROC(glGetBufferSubData), /* OpenGL 1.5 */
     //PROC(glGetClipPlane),
+    PROC(glGetColorTableParameterivEXT), /* GL_EXT_paletted_texture */
     PROC(glGetDoublev),
     PROC(glGetError),
     PROC(glGetFloatv),
@@ -450,19 +453,8 @@ static void *search_in_functions(const OgxProcMap *functions, size_t count,
     return elem ? elem->address : NULL;
 }
 
-void *ogx_get_proc_address(const char *proc)
+static void *lookup_proc(const char *proc)
 {
-    char buffer[64];
-    size_t len;
-
-    /* If the string ends with the "ARB" suffix, remove it */
-    len = strlen(proc);
-    if (len > 3 && strcmp(proc + len - 3, "ARB") == 0) {
-        strncpy(buffer, proc, len - 3);
-        buffer[len - 3] = '\0';
-        proc = buffer;
-    }
-
     void *ret = NULL;
     if (_ogx_shader_functions.num_functions > 0) {
         ret = search_in_functions(_ogx_shader_functions.functions,
@@ -471,4 +463,25 @@ void *ogx_get_proc_address(const char *proc)
         if (ret) return ret;
     }
     return search_in_functions(s_proc_map, NUM_PROCS, proc);
+}
+
+void *ogx_get_proc_address(const char *proc)
+{
+    char buffer[64];
+    size_t len;
+
+    /* Some extension functions are only available with their suffix */
+    void *ret = lookup_proc(proc);
+    if (ret) return ret;
+
+    /* If the string ends with the "ARB" or "EXT" suffix, remove it */
+    len = strlen(proc);
+    if (len > 3 && len < sizeof(buffer) &&
+        (strcmp(proc + len - 3, "ARB") == 0 ||
+         strcmp(proc + len - 3, "EXT") == 0)) {
+        strncpy(buffer, proc, len - 3);
+        buffer[len - 3] = '\0';
+        return lookup_proc(buffer);
+    }
+    return NULL;
 }

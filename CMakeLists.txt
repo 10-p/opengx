@@ -66,6 +66,8 @@ add_library(${TARGET} STATIC
     src/texture_gen_sw.h
     src/texture_unit.c
     src/texture_unit.h
+    src/tlut.c
+    src/tlut.h
     src/types.h
     src/utils.h
     src/vbo.c

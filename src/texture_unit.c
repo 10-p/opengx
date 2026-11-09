@@ -32,6 +32,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "debug.h"
 #include "gpu_resources.h"
 #include "texture_gen_sw.h"
+#include "tlut.h"
 #include "utils.h"
 
 static void setup_texture_gen(const OgxTextureUnit *tu, u8 tex_coord,
@@ -433,7 +434,24 @@ static void setup_texture_stage(const OgxTextureUnit *tu,
     bool points_enabled = glparamstate.point_sprites_enabled &&
         glparamstate.point_sprites_coord_replace;
     GX_EnableTexOffsets(tex_coord, GX_DISABLE, points_enabled);
-    GX_LoadTexObj(&texture_list[tu->glcurtex].texobj, tex_map);
+    gltexture_ *texture = &texture_list[tu->glcurtex];
+    if (GX_GetTexObjFmt(&texture->texobj) == GX_TF_CI8) {
+        /* Colour-index textures cannot interpolate between mipmap levels
+         * (GX hardware limitation): fall back to the nearest level. */
+        u8 min_filter, mag_filter;
+        GX_GetTexObjFilterMode(&texture->texobj, &min_filter, &mag_filter);
+        if (min_filter == GX_LIN_MIP_LIN || min_filter == GX_NEAR_MIP_LIN) {
+            min_filter = min_filter == GX_LIN_MIP_LIN ?
+                GX_LIN_MIP_NEAR : GX_NEAR_MIP_NEAR;
+            GX_InitTexObjFilterMode(&texture->texobj, min_filter, mag_filter);
+        }
+        if (texture->tlut) {
+            _ogx_tlut_bind(&texture->texobj, texture->tlut);
+        } else {
+            warning("Paletted texture %d has no palette", tu->glcurtex);
+        }
+    }
+    GX_LoadTexObj(&texture->texobj, tex_map);
 }
 
 static void setup_texture_stage_matrix(const OgxTextureUnit *tu,

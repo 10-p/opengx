@@ -98,9 +98,12 @@ typedef struct {
 
 typedef float ClipPlane[4];
 
+struct OgxTlut;
+
 typedef struct gltexture_
 {
     GXTexObj texobj;
+    struct OgxTlut *tlut; /* palette, for GX_TF_CI8 textures */
 } gltexture_;
 
 typedef enum {
