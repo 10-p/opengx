@@ -173,6 +173,14 @@ triangles, 5112 vertices of 44 bytes: position, normal, RGBA8 colour, two textur
   lights' own ambient and the specular term (GX has two colour channels).
 - Check: `l.emission` (emission + global ambient + one directional light, and with the light off; within 2).
 
+### `GL_NORMALIZE` and `GL_RESCALE_NORMAL`
+- GX does not normalize transformed normals. With either enabled, the normal matrix (the modelview's inverse
+  transpose) is scaled by `1 / cbrt(|det|)` of its 3x3 part, exact for a modelview with a uniform scale and
+  unit input normals; `glIsEnabled`/`glGetBooleanv` report them.
+- Dolphin's lighting normalizes every normal, so in the emulator the result is the same with and without them
+  (the check reports the unnormalized case and does not test it).
+- Check: `p.lighting` (glScalef(4), one light of 0.5: 128 with either enabled, and with the identity).
+
 ### Spotlights
 - Upstream drew every positional light as a point light (`GL_SPOT_CUTOFF` and `GL_SPOT_DIRECTION` were stored
   and not used; "FIXME: Need to consider spotlights"), so a spotlight lit everything around it.

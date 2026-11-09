@@ -164,6 +164,22 @@ static inline void update_normal_matrix()
     Mtx mvinverse, normalm;
     guMtxInverse(glparamstate.modelview_matrix, mvinverse);
     guMtxTranspose(mvinverse, normalm);
+    if (glparamstate.normalize) {
+        /* GX does not normalize the transformed normals: GL_NORMALIZE and
+         * GL_RESCALE_NORMAL scale the normal matrix by the inverse of its
+         * average axis length, exact for a modelview with a uniform scale and
+         * unit input normals. */
+        float det = normalm[0][0] * (normalm[1][1] * normalm[2][2] - normalm[1][2] * normalm[2][1])
+                  - normalm[0][1] * (normalm[1][0] * normalm[2][2] - normalm[1][2] * normalm[2][0])
+                  + normalm[0][2] * (normalm[1][0] * normalm[2][1] - normalm[1][1] * normalm[2][0]);
+        if (det < 0) det = -det;
+        if (det > 1e-12f) {
+            float f = 1.0f / cbrtf(det);
+            for (int r = 0; r < 3; r++)
+                for (int c = 0; c < 3; c++)
+                    normalm[r][c] *= f;
+        }
+    }
     GX_LoadNrmMtxImm(normalm, GX_PNMTX0);
 }
 
@@ -713,6 +729,11 @@ void glEnable(GLenum cap)
         glparamstate.polygon_offset_fill = 1;
         glparamstate.dirty.bits.dirty_matrices = 1;
         break;
+    case GL_NORMALIZE:
+    case GL_RESCALE_NORMAL:
+        glparamstate.normalize = 1;
+        glparamstate.dirty.bits.dirty_matrices = 1;
+        break;
     default:
         break;
     }
@@ -794,6 +815,11 @@ void glDisable(GLenum cap)
         break;
     case GL_POLYGON_OFFSET_FILL:
         glparamstate.polygon_offset_fill = 0;
+        glparamstate.dirty.bits.dirty_matrices = 1;
+        break;
+    case GL_NORMALIZE:
+    case GL_RESCALE_NORMAL:
+        glparamstate.normalize = 0;
         glparamstate.dirty.bits.dirty_matrices = 1;
         break;
     default:

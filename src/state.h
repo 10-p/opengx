@@ -181,6 +181,7 @@ typedef struct glparams_
     unsigned char frontcw, cullenabled;
     bool color_update;
     bool polygon_offset_fill;
+    bool normalize;
     bool raster_pos_valid;
     bool scissor_enabled;
     unsigned point_sprites_enabled : 1;

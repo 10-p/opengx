@@ -139,6 +139,9 @@ GLboolean glIsEnabled(GLenum cap)
     case GL_LIGHT6:
     case GL_LIGHT7:
         return glparamstate.lighting.lights[cap - GL_LIGHT0].enabled;
+    case GL_NORMALIZE:
+    case GL_RESCALE_NORMAL:
+        return glparamstate.normalize;
     case GL_LIGHTING:
         return glparamstate.lighting.enabled;
     case GL_NORMAL_ARRAY:
@@ -201,8 +204,10 @@ void glGetBooleanv(GLenum pname, GLboolean *params)
     case GL_LIGHT6:
     case GL_LIGHT7:
     case GL_NORMAL_ARRAY:
+    case GL_NORMALIZE:
     case GL_POINT_SPRITE:
     case GL_POLYGON_OFFSET_FILL:
+    case GL_RESCALE_NORMAL:
     case GL_SCISSOR_TEST:
     case GL_STENCIL_TEST:
     case GL_TEXTURE_2D:
