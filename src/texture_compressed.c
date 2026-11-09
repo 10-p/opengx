@@ -163,6 +163,9 @@ static void native_tex_image(gltexture_ *currtex, GLint level, uint8_t gx_format
                                           gx_format, &ti);
     }
     if (!ok) return;
+    /* RGB565 has the GL_RGB base format (no alpha); the others have alpha
+     * (I8 is an intensity format: alpha = I) */
+    ti.ud.d.is_opaque = gx_format == GX_TF_RGB565;
 
     uint8_t *dst = (uint8_t *)ti.texels +
         _ogx_texture_level_offset(level, ti.width, ti.height, ti.format);

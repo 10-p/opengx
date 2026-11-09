@@ -82,6 +82,7 @@ extern uintptr_t ogx_fast_conv_RGBA_I8;
 extern uintptr_t ogx_fast_conv_RGBA_A8;
 extern uintptr_t ogx_fast_conv_RGBA_IA8;
 extern uintptr_t ogx_fast_conv_RGBA_RGB565;
+extern uintptr_t ogx_fast_conv_RGBA_RGB5A3;
 extern uintptr_t ogx_fast_conv_RGBA_RGBA8;
 extern uintptr_t ogx_fast_conv_RGB_I8;
 extern uintptr_t ogx_fast_conv_RGB_IA8;

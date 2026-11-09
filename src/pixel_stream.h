@@ -155,8 +155,11 @@ struct CompoundPixelStream: public PixelStreamBase {
         uint32_t value = pixel & mask;
         int shift = mask_data.bytes * 8 - offset - 8;
         uint8_t c = shift > 0 ? (value >> shift) : (value << -shift);
-        if (nbits < 8) {
-            c |= (c >> nbits);
+        /* Replicate the bits down to fill the byte (one pass is not enough
+         * for components narrower than 4 bits, e.g. the 1-bit alpha of
+         * GL_UNSIGNED_SHORT_5_5_5_1, which upstream expanded to 0xc0) */
+        for (int n = nbits; n < 8; n *= 2) {
+            c |= (c >> n);
         }
         return c;
     }

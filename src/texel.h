@@ -214,6 +214,41 @@ struct TexelRGB565: public Texel16 {
     }
 };
 
+struct TexelRGB5A3: public Texel16 {
+    static constexpr bool has_alpha = true;
+    static constexpr bool has_rgb = true;
+    static constexpr bool has_luminance = false;
+
+    TexelRGB5A3() = default;
+    /* Opaque texels (alpha rounding to 7/7 in 3 bits) are stored as
+     * 1RRRRRGGGGGBBBBB, the others as 0AAARRRRGGGGBBBB */
+    void set_color(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+        int a3 = (a * 7 + 127) / 255;
+        if (a3 == 7) {
+            setWord(0x8000 | ((r & 0xf8) << 7) | ((g & 0xf8) << 2) | (b >> 3));
+        } else {
+            setWord((a3 << 12) | ((r & 0xf0) << 4) | (g & 0xf0) | (b >> 4));
+        }
+    }
+
+    void set_color(GXColor c) override { set_color(c.r, c.g, c.b, c.a); }
+
+    GXColor read() override {
+        uint16_t *d = current_address();
+        next();
+        uint16_t v = *d;
+        if (v & 0x8000) {
+            uint8_t r = (v >> 7) & 0xf8, g = (v >> 2) & 0xf8, b = (v << 3) & 0xf8;
+            return { uint8_t(r | (r >> 5)), uint8_t(g | (g >> 5)),
+                     uint8_t(b | (b >> 5)), 255 };
+        }
+        uint8_t a = (v >> 12) & 7;
+        return { uint8_t(((v >> 8) & 0xf) * 17), uint8_t(((v >> 4) & 0xf) * 17),
+                 uint8_t((v & 0xf) * 17),
+                 uint8_t((a << 5) | (a << 2) | (a >> 1)) };
+    }
+};
+
 struct Texel8: public Texel {
     Texel8() = default;
     void setByte(uint8_t b) { value = b; }

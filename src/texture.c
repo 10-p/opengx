@@ -635,6 +635,8 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
                        texobj, &ti, 0, 0);
     }
 
+    /* Remember if the GL base format has no alpha */
+    ti.ud.d.is_opaque = !_ogx_internal_format_has_alpha(internalFormat);
     _ogx_texture_commit(texobj, &ti);
 }
 

@@ -130,6 +130,23 @@ Level sizes: `ceil(w/tw) * ceil(h/th) * 32` bytes (`*64` for RGBA8), with `tw x 
 (`GX_GetTexBufferSize()`, except for CI8 where libogc is wrong: CI8 is sized like I8). In a chain, level k
 (`max(w>>k,1) x max(h>>k,1)`) starts right after level k-1.
 
+### Internal formats: `GL_RGB5_A1`, `GL_RGBA4`, luminance/alpha/intensity
+- `GL_RGB5_A1`, `GL_RGBA4`, `GL_RGBA2` → `GX_TF_RGB5A3` (new `TexelRGB5A3` converter, plus a registered fast
+  path from `GL_RGBA` bytes). Upstream sent them to the default branch, i.e. `GX_TF_CMPR`, then ran the RGB DXT
+  compressor on RGBA data: corrupt texture. 1-bit alpha is exact; 4-bit alpha keeps 3 bits; texels whose alpha
+  rounds to 7/7 get 5-bit colour, the others 4-bit. (So `GL_RGB5_A1` with a source alpha of e.g. 200 is stored
+  translucent 5/7 instead of opaque.)
+- Sized luminance / luminance-alpha / intensity / alpha formats (`GL_LUMINANCE8`, `GL_LUMINANCE8_ALPHA8`,
+  `GL_INTENSITY8`, `GL_ALPHA8`, … and the component counts 1 and 2) map to I8 / IA8 / I8 / A8 instead of CMPR.
+- `GL_UNSIGNED_SHORT_5_5_5_1` (and every packed type with components narrower than 4 bits) expanded the
+  components with a single bit replication: 1-bit alpha 1 became 0xc0. Now replicated to the full byte.
+- Base-format semantics (GL 1.5, table 3.22): GX I8 returns the intensity as alpha too, and every GX format has
+  some colour. Textures whose GL base format has no alpha (`GL_RGB*`, `GL_LUMINANCE*`, RGB DXT1, native RGB565)
+  are flagged `is_opaque`; `GL_ALPHA*` ones `is_alpha`. In `GL_REPLACE/MODULATE/ADD/BLEND` the missing
+  channels now pass the fragment value through (upstream: `GL_LUMINANCE` modulated alpha by L, `GL_ALPHA`
+  replaced/modulated the colour with A, `GL_RGB` + `GL_REPLACE` replaced the fragment alpha with 1); in
+  `GL_COMBINE` such a texture's alpha source reads 1.0 and an alpha texture's colour source reads 0.
+
 ## Framebuffer
 
 ### `glReadPixels`: GL orientation and a fast path

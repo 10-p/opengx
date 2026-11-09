@@ -57,6 +57,7 @@ static struct FastConversion {
     { GL_RGB, GX_TF_RGB565, ogx_fast_conv_RGB_RGB565 },
     { GL_RGBA, GX_TF_RGBA8, ogx_fast_conv_RGBA_RGBA8 },
     { GL_LUMINANCE, GX_TF_I8, ogx_fast_conv_Intensity_I8 },
+    { GL_RGBA, GX_TF_RGB5A3, ogx_fast_conv_RGBA_RGB5A3 },
     0,
 };
 
@@ -321,6 +322,7 @@ void _ogx_bytes_to_texture(const void *data, GLenum format, GLenum type,
     std::variant<
         TexelRGBA8,
         TexelRGB565,
+        TexelRGB5A3,
         TexelIA8,
         TexelI8,
         TexelI4,
@@ -346,6 +348,10 @@ void _ogx_bytes_to_texture(const void *data, GLenum format, GLenum type,
     case GX_TF_RGB565:
         texel_v = TexelRGB565();
         texel = &std::get<TexelRGB565>(texel_v);
+        break;
+    case GX_TF_RGB5A3:
+        texel_v = TexelRGB5A3();
+        texel = &std::get<TexelRGB5A3>(texel_v);
         break;
     case GX_TF_IA8:
         texel_v = TexelIA8();
@@ -471,6 +477,7 @@ int _ogx_pitch_for_width(uint32_t gx_format, int width)
     case GX_TF_RGBA8:
         return TexelRGBA8::compute_pitch(width);
     case GX_TF_RGB565:
+    case GX_TF_RGB5A3:
     case GX_TF_IA8:
         return TexelRGB565::compute_pitch(width);
     case GX_TF_I8:
@@ -503,14 +510,70 @@ uint8_t _ogx_gl_format_to_gx(GLenum format)
     case GL_GREEN:
     case GL_BLUE:
         return GX_TF_RGBA8;
+    case GL_RGB5_A1:
+    case GL_RGBA4:
+    case GL_RGBA2:
+        /* 1-bit alpha: exact; 4-bit alpha: 3 bits kept */
+        return GX_TF_RGB5A3;
     case GL_COLOR_INDEX8_EXT: return GX_TF_CI8;
-    case GL_LUMINANCE_ALPHA: return GX_TF_IA8;
-    case GL_LUMINANCE: return GX_TF_I8;
+    case 2:
+    case GL_LUMINANCE_ALPHA:
+    case GL_LUMINANCE4_ALPHA4:
+    case GL_LUMINANCE6_ALPHA2:
+    case GL_LUMINANCE8_ALPHA8:
+    case GL_LUMINANCE12_ALPHA4:
+    case GL_LUMINANCE12_ALPHA12:
+    case GL_LUMINANCE16_ALPHA16:
+        return GX_TF_IA8;
+    case 1:
+    case GL_LUMINANCE:
+    case GL_LUMINANCE4:
+    case GL_LUMINANCE8:
+    case GL_LUMINANCE12:
+    case GL_LUMINANCE16:
+    case GL_INTENSITY:
+    case GL_INTENSITY4:
+    case GL_INTENSITY8:
+    case GL_INTENSITY12:
+    case GL_INTENSITY16:
+        return GX_TF_I8;
     case GL_ALPHA:
+    case GL_ALPHA4:
+    case GL_ALPHA8:
+    case GL_ALPHA12:
+    case GL_ALPHA16:
         /* Note, we won't be really passing this to GX */
         return GX_TF_A8;
     default:
         return GX_TF_CMPR;
+    }
+}
+
+bool _ogx_internal_format_has_alpha(GLenum internal_format)
+{
+    switch (internal_format) {
+    case 1:
+    case 3:
+    case GL_RGB:
+    case GL_BGR:
+    case GL_RGB4:
+    case GL_RGB5:
+    case GL_RGB8:
+    case GL_RGB10:
+    case GL_RGB12:
+    case GL_RGB16:
+    case GL_R3_G3_B2:
+    case GL_LUMINANCE:
+    case GL_LUMINANCE4:
+    case GL_LUMINANCE8:
+    case GL_LUMINANCE12:
+    case GL_LUMINANCE16:
+    case GL_COMPRESSED_RGB:
+    case GL_COMPRESSED_LUMINANCE:
+    case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
+        return false;
+    default:
+        return true;
     }
 }
 
@@ -547,6 +610,7 @@ DEFINE_FAST_CONVERSION(RGBA, I8)
 DEFINE_FAST_CONVERSION(RGBA, A8)
 DEFINE_FAST_CONVERSION(RGBA, IA8)
 DEFINE_FAST_CONVERSION(RGBA, RGB565)
+DEFINE_FAST_CONVERSION(RGBA, RGB5A3) // *
 DEFINE_FAST_CONVERSION(RGBA, RGBA8) // *
 DEFINE_FAST_CONVERSION(RGB, I8)
 DEFINE_FAST_CONVERSION(RGB, IA8)

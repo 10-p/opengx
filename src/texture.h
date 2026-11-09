@@ -49,9 +49,10 @@ typedef union {
     struct {
         unsigned is_reserved: 1;
         unsigned is_alpha: 1;
-        /* The texture alpha must read as 1.0 even where the GX texture has
-         * transparent texels (GL_COMPRESSED_RGB_S3TC_DXT1_EXT stored as
-         * CMPR). Handled when setting up the TEV. */
+        /* The GL base format has no alpha (GL_RGB*, GL_LUMINANCE*, RGB
+         * DXT1): the texture alpha must read as 1.0 (GX I8 returns I as
+         * alpha, CMPR may have transparent texels) and the non-combine env
+         * modes pass the fragment alpha through. Handled in the TEV setup. */
         unsigned is_opaque: 1;
     } d;
 } OgxTextureUserData;

@@ -49,6 +49,8 @@ int _ogx_pitch_for_width(uint32_t gx_format, int width);
 void _ogx_tile_8bpp(const uint8_t *src, int src_pitch, int width, int height,
                     uint8_t *dst, int x, int y, int dstpitch);
 uint8_t _ogx_gl_format_to_gx(GLenum format);
+/* false if the GL base format of the internal format has no alpha */
+bool _ogx_internal_format_has_alpha(GLenum internal_format);
 uint8_t _ogx_find_best_gx_format(GLenum format, GLenum internal_format,
                                  int width, int height);
 
