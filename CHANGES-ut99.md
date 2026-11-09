@@ -165,6 +165,20 @@ Level sizes: `ceil(w/tw) * ceil(h/th) * 32` bytes (`*64` for RGBA8), with `tw x 
   texture away and rebuilt it around that tiny level (flat-coloured surfaces in UT). Now a level whose size
   matches the existing texture's level keeps the texture; `size << level` is only used for a new base size.
 
+### Texture uploads without a GPU sync (buffer orphaning)
+- Upstream `glTexImage2D` (and the compressed/native uploads) started with `GX_DrawDone()`: the CPU waited until
+  the GPU had drawn everything queued, on every upload. `glTexSubImage2D` did not wait at all and wrote into
+  texels that queued draws were still going to read (in Dolphin 19 of 20 draws interleaved with sub-image
+  updates showed the last upload).
+- Now a texture is marked `in_use` when it is bound to a TEV stage. An upload into an `in_use` texture first
+  gives it a fresh texel buffer (a copy of the old one unless the upload replaces all of a single-level
+  texture), sends a draw-sync token, and frees the old buffer once the GPU has passed that token
+  (`_ogx_free_after_gpu`). A texture not drawn since its last upload is written in place. No upload waits for
+  the GPU any more (only if the 128-entry deferred-free list fills up, or a copy can't be allocated).
+- opengx's draw-sync tokens restart from 0 at every `ogx_prepare_swap_buffers()` (which sends token 0); FIFO
+  points are therefore tracked as (swap markers sent before, token), the sync callback counting the zeros.
+- `glDeleteTextures` uses the same deferred free instead of a `GX_DrawDone()`, for texels and palettes.
+
 ## Framebuffer
 
 ### `glClear` colour writes

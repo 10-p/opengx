@@ -55,6 +55,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "selection.h"
 #include "shader.h"
 #include "state.h"
+#include "texture.h"
 #include "stencil.h"
 #include "texture_gen_sw.h"
 #include "texture_unit.h"
@@ -237,6 +238,7 @@ int ogx_prepare_swap_buffers()
     if (glparamstate.render_mode != GL_RENDER) return -1;
     _ogx_draw_sync_token = 0;
     GX_SetDrawSync(0);
+    _ogx_texture_swap_marker_sent();
     _ogx_vbo_clear_unbound_buffers();
     return 0;
 }
@@ -260,6 +262,7 @@ static int parse_hints()
 static void draw_sync_callback(u16 token)
 {
     _ogx_draw_sync_token_received = token;
+    if (token == 0) _ogx_texture_swap_marker_received();
 }
 
 void ogx_initialize()

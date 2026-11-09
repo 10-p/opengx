@@ -83,13 +83,14 @@ void _ogx_tlut_bind(GXTexObj *texobj, OgxTlut *tlut)
     GX_InitTexObjTlut(texobj, GX_TLUT0 + region);
 }
 
-void _ogx_tlut_free(OgxTlut *tlut)
+void _ogx_tlut_free(OgxTlut *tlut, bool in_use)
 {
     for (int i = 0; i < NUM_TLUT_REGIONS; i++) {
         if (s_regions[i].serial == tlut->serial)
             s_regions[i].serial = 0;
     }
-    free(tlut);
+    if (in_use) _ogx_free_after_gpu(tlut);
+    else free(tlut);
 }
 
 static uint8_t tlut_format_for_internal_format(GLenum internal_format)
@@ -260,7 +261,7 @@ void glColorTableEXT(GLenum target, GLenum internal_format, GLsizei width,
          * are in the FIFO */
         GX_DrawDone();
         if (tlut->gx_entries < gx_entries) {
-            _ogx_tlut_free(tlut);
+            _ogx_tlut_free(tlut, false);
             tlut = t->tlut = NULL;
         }
     }

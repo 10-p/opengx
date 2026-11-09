@@ -146,6 +146,89 @@ static void texture_get_info(const GXTexObj *obj, OgxTextureInfo *info)
         info->format = GX_TF_A8;
 }
 
+/* Deferred frees. opengx's draw sync tokens restart from 0 at every
+ * ogx_prepare_swap_buffers(), which sends a token 0 itself; so a FIFO point
+ * is identified by (number of swap markers sent before it, token). */
+#define MAX_DEFERRED_FREES 128
+static struct {
+    void *ptr;
+    uint32_t swap;
+    uint16_t token;
+} s_deferred[MAX_DEFERRED_FREES];
+static int s_num_deferred = 0;
+static uint32_t s_swaps_sent = 0;
+static volatile uint32_t s_swaps_received = 0;
+uint32_t _ogx_texture_orphans = 0;
+
+void _ogx_texture_swap_marker_sent(void) { s_swaps_sent++; }
+/* Called from the draw sync interrupt */
+void _ogx_texture_swap_marker_received(void) { s_swaps_received++; }
+
+static bool fifo_point_passed(uint32_t swap, uint16_t token)
+{
+    uint32_t received = s_swaps_received;
+    if (received > swap) return true;
+    return received == swap && _ogx_draw_sync_token_received >= token;
+}
+
+static void reap_deferred(void)
+{
+    int j = 0;
+    for (int i = 0; i < s_num_deferred; i++) {
+        if (fifo_point_passed(s_deferred[i].swap, s_deferred[i].token)) {
+            free(s_deferred[i].ptr);
+        } else {
+            s_deferred[j++] = s_deferred[i];
+        }
+    }
+    s_num_deferred = j;
+}
+
+void _ogx_free_after_gpu(void *ptr)
+{
+    reap_deferred();
+    if (s_num_deferred == MAX_DEFERRED_FREES) {
+        GX_DrawDone();
+        for (int i = 0; i < s_num_deferred; i++) free(s_deferred[i].ptr);
+        s_num_deferred = 0;
+    }
+    s_deferred[s_num_deferred].ptr = ptr;
+    s_deferred[s_num_deferred].swap = s_swaps_sent;
+    s_deferred[s_num_deferred].token = send_draw_sync_token();
+    s_num_deferred++;
+}
+
+void _ogx_texture_make_writable(gltexture_ *texture, bool keep_contents)
+{
+    reap_deferred();
+    if (!texture->in_use) return;
+    texture->in_use = 0;
+
+    void *old = GX_GetTexObjData(&texture->texobj);
+    if (!old) return;
+    old = MEM_PHYSICAL_TO_K0(old);
+
+    OgxTextureInfo ti;
+    texture_get_info(&texture->texobj, &ti);
+    /* Buffers hold either level 0 only or a full chain */
+    uint32_t size = ti.minlevel == 0 && ti.maxlevel == 0 ?
+        calc_memory(ti.width, ti.height, ti.format) :
+        calc_tex_size(ti.width, ti.height, ti.format);
+    void *texels = memalign(32, size);
+    if (!texels) {
+        /* No memory for a copy: wait for the GPU instead */
+        GX_DrawDone();
+        return;
+    }
+    if (keep_contents) {
+        memcpy(texels, old, size);
+        DCFlushRange(texels, size);
+    }
+    GX_InitTexObjData(&texture->texobj, texels);
+    _ogx_free_after_gpu(old);
+    _ogx_texture_orphans++;
+}
+
 bool _ogx_texture_get_info(GLuint texture_name, OgxTextureInfo *info)
 {
     if (!TEXTURE_IS_RESERVED(texture_list[texture_name]))
@@ -746,11 +829,18 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
     if (target != GL_TEXTURE_2D)
         return; // FIXME Implement non 2D textures
 
-    GX_DrawDone(); // Very ugly, we should have a list of used textures and only wait if we are using the curr tex.
-                   // This way we are sure that we are not modifying a texture which is being drawn
-
     gltexture_ *currtex = &texture_list[tex_id];
     GXTexObj *texobj = &currtex->texobj;
+
+    /* Instead of waiting for the GPU (upstream did a GX_DrawDone() here),
+     * give the texture a new buffer if queued draws may still read it. The
+     * old contents only matter for the other levels of a mipmapped one. */
+    {
+        float minlod, maxlod;
+        GX_GetTexObjLOD(texobj, &minlod, &maxlod);
+        _ogx_texture_make_writable(currtex,
+                                   !(level == 0 && minlod == 0 && maxlod == 0));
+    }
 
     uint8_t gx_format = _ogx_find_best_gx_format(format, internalFormat,
                                                  width, height);
@@ -798,6 +888,19 @@ void glTexSubImage2D(GLenum target, GLint level, GLint xoffset, GLint yoffset,
 
     gltexture_ *currtex = &texture_list[tex_id];
 
+    /* Upstream wrote into texels that queued draws could still read. The old
+     * contents can be dropped only if this replaces all of a single-level
+     * texture. */
+    {
+        float minlod, maxlod;
+        GX_GetTexObjLOD(&currtex->texobj, &minlod, &maxlod);
+        bool whole = level == 0 && minlod == 0 && maxlod == 0 &&
+            xoffset == 0 && yoffset == 0 &&
+            width == GX_GetTexObjWidth(&currtex->texobj) &&
+            height == GX_GetTexObjHeight(&currtex->texobj);
+        _ogx_texture_make_writable(currtex, !whole);
+    }
+
     OgxTextureInfo ti;
     texture_get_info(&currtex->texobj, &ti);
     if (level > ti.maxlevel) {
@@ -843,15 +946,20 @@ void glTexImage3D(GLenum target, GLint level, GLint internalFormat,
 void glDeleteTextures(GLsizei n, const GLuint *textures)
 {
     const GLuint *texlist = textures;
-    GX_DrawDone();
     while (n-- > 0) {
         int i = *texlist++;
         if (i > 0 && i < _MAX_GL_TEX) {
+            /* Textures (and palettes) queued draws may still read are freed
+             * once the GPU is past them, instead of waiting for it */
+            bool in_use = texture_list[i].in_use;
             void *data = GX_GetTexObjData(&texture_list[i].texobj);
-            if (data != 0)
-                free(MEM_PHYSICAL_TO_K0(data));
+            if (data != 0) {
+                data = MEM_PHYSICAL_TO_K0(data);
+                if (in_use) _ogx_free_after_gpu(data);
+                else free(data);
+            }
             if (texture_list[i].tlut)
-                _ogx_tlut_free(texture_list[i].tlut);
+                _ogx_tlut_free(texture_list[i].tlut, in_use);
             memset(&texture_list[i], 0, sizeof(texture_list[i]));
         }
     }

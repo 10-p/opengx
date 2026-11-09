@@ -481,6 +481,7 @@ static void setup_texture_stage(const OgxTextureUnit *tu,
             warning("Paletted texture %d has no palette", tu->glcurtex);
         }
     }
+    texture->in_use = 1;
     GX_LoadTexObj(&texture->texobj, tex_map);
 }
 

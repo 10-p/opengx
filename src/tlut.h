@@ -34,6 +34,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include <GL/gl.h>
 #include <ogc/gx.h>
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -56,7 +57,8 @@ typedef struct OgxTlut {
 /* Select a TMEM TLUT for the texture object (loading the palette there if
  * it's not already resident) and point the texture object at it. */
 void _ogx_tlut_bind(GXTexObj *texobj, OgxTlut *tlut);
-void _ogx_tlut_free(OgxTlut *tlut);
+/* "in_use": queued draws may still load it, free it once they're done */
+void _ogx_tlut_free(OgxTlut *tlut, bool in_use);
 
 #ifdef __cplusplus
 } // extern C

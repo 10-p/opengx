@@ -148,7 +148,15 @@ static void native_tex_image(gltexture_ *currtex, GLint level, uint8_t gx_format
         return;
     }
 
-    GX_DrawDone(); /* the texture might be in use by queued draws */
+    /* No GX_DrawDone(): a texture queued draws may still read gets a new
+     * buffer. Only a single-level replacement can drop the old contents. */
+    {
+        float minlod, maxlod;
+        GX_GetTexObjLOD(texobj, &minlod, &maxlod);
+        _ogx_texture_make_writable(currtex, !(level == 0 &&
+                                              (num_levels > 1 ||
+                                               (minlod == 0 && maxlod == 0))));
+    }
 
     OgxTextureInfo ti;
     bool ok;
@@ -214,7 +222,12 @@ void glCompressedTexImage2D(GLenum target, GLint level, GLenum internal_format,
         return;
     }
 
-    GX_DrawDone(); /* the texture might be in use by queued draws */
+    {
+        float minlod, maxlod;
+        GX_GetTexObjLOD(texobj, &minlod, &maxlod);
+        _ogx_texture_make_writable(currtex,
+                                   !(level == 0 && minlod == 0 && maxlod == 0));
+    }
 
     OgxTextureInfo ti;
     if (!_ogx_texture_prepare_storage(texobj, level, width, height,
@@ -272,7 +285,8 @@ void glCompressedTexSubImage2D(GLenum target, GLint level,
         return;
     }
 
-    GX_DrawDone();
+    _ogx_texture_make_writable(currtex, true);
+    _ogx_texture_get_info(glparamstate.texture_unit[unit].glcurtex, &ti);
     uint8_t *dst = (uint8_t *)ti.texels +
         _ogx_texture_level_offset(level, ti.width, ti.height, ti.format);
     dxt1_to_cmpr(data, (width + 3) / 4, (height + 3) / 4, dst,

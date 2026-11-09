@@ -104,6 +104,9 @@ typedef struct gltexture_
 {
     GXTexObj texobj;
     struct OgxTlut *tlut; /* palette, for GX_TF_CI8 textures */
+    /* Set when the texture is bound to a TEV stage: draws in the FIFO may
+     * still read its texels, see _ogx_texture_make_writable() */
+    uint8_t in_use;
 } gltexture_;
 
 typedef enum {

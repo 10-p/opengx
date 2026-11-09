@@ -90,6 +90,20 @@ bool _ogx_texture_prepare_storage(GXTexObj *texobj, GLint level,
                                   int width, int height, uint8_t gx_format,
                                   OgxTextureInfo *ti);
 void _ogx_texture_commit(GXTexObj *texobj, const OgxTextureInfo *ti);
+
+struct gltexture_;
+/* Make the texel buffer of a texture safe to write from the CPU without
+ * waiting for the GPU: if queued draws may still read it, the texture gets a
+ * new buffer (a copy of the old one if "keep_contents") and the old buffer is
+ * freed once the GPU has passed the current point of the FIFO. */
+void _ogx_texture_make_writable(struct gltexture_ *texture, bool keep_contents);
+/* Free memory the GPU may still read, once it has passed the current FIFO
+ * point */
+void _ogx_free_after_gpu(void *ptr);
+/* Hooks for the frame boundary (draw sync tokens restart from 0 there) */
+void _ogx_texture_swap_marker_sent(void);
+void _ogx_texture_swap_marker_received(void);
+extern uint32_t _ogx_texture_orphans; /* statistics, for tests */
 /* Byte offset of a mipmap level in the texel buffer, and size of a level,
  * correct for GX_TF_CI8 too. "w" and "h" are the size of level 0. */
 uint32_t _ogx_texture_level_offset(int level, int w, int h, uint32_t format);

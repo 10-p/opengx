@@ -122,5 +122,6 @@ void ogx_shader_set_mvp_gl(const GLfloat *matrix)
 GXTexObj *ogx_shader_get_texobj(int texture_unit)
 {
     OgxTextureUnit *tu = &glparamstate.texture_unit[texture_unit];
+    texture_list[tu->glcurtex].in_use = 1;
     return &texture_list[tu->glcurtex].texobj;
 }
