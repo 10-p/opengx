@@ -70,6 +70,20 @@ void _ogx_array_reader_read_color(OgxArrayReader *reader,
                                   int index, GXColor *color);
 
 void _ogx_arrays_reset(void);
+
+/* Indexed GX arrays for the next draw of the current readers, whose array
+ * indices are in [min, max]: the client data the draw needs is copied for
+ * the GPU. False if the draw must use the direct path. The plan is used by
+ * the next _ogx_arrays_setup_draw(OGX_DRAW_FLAG_NONE) and dropped by
+ * _ogx_arrays_draw_done(). */
+bool _ogx_arrays_plan_indexed(int min, int max, int count);
+bool _ogx_arrays_indexed_planned(void);
+void _ogx_arrays_draw_indexed_elements(const OgxDrawData *draw_data,
+                                       const void *indices);
+void _ogx_arrays_draw_indexed_arrays(const OgxDrawData *draw_data);
+/* Smallest and largest index (-1 if it does not fit an int) */
+void _ogx_arrays_index_range(const void *indices, GLenum type, int count,
+                             int *min, int *max);
 OgxArrayReader *_ogx_array_add_constant_fv(uint8_t attribute, int size,
                                            const float *values);
 OgxArrayReader *_ogx_array_add(uint8_t attribute,

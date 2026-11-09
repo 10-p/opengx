@@ -50,6 +50,44 @@ sent upstream on its own. Licence unchanged (BSD-3-Clause, see the file headers)
 - Check: `k.vbo` (1500 buffers drawn at once, each its own colour; a buffer drawn after 200 tokens, rewritten
   after a swap: no hang, the new data, 0.03 ms).
 
+## Vertex submission
+
+Numbers: `tests/opengx-bench` section (k) (Dolphin 2512, Null backend, emulated time; a 71x72-vertex grid, 9940
+triangles, 5112 vertices of 44 bytes: position, normal, RGBA8 colour, two texture coordinate sets; lit with
+`GL_COLOR_MATERIAL`, textured; "submit" is the time spent in the GL calls, FIFO the bytes the CPU wrote for one
+99-triangle draw).
+
+### Indexed GX arrays for `glDrawElements` / `glDrawRangeElements`
+- The vertex loader fetches the attributes itself: `GX_SetArray()` per attribute, `GX_INDEX8` (an index range of
+  at most 255 vertices) or `GX_INDEX16` in the vertex descriptor, and the FIFO receives one index per attribute
+  and vertex (written as 32-bit stores of repeated indices) instead of the attribute values read and written one
+  by one through a virtual call per attribute.
+- Buffer object data is used in place. Client arrays may be changed as soon as the call returns, so the index
+  range the draw uses is copied into a 1 MB ring buffer (16 parts, each fenced by a draw sync token when the
+  copies move past it, reused once the GPU passed it; `DCStoreRange` on the copy); the attributes of an
+  interleaved vertex share one copy. Float colours (`glColorPointer(4, GL_FLOAT)`, UT99's NOpenGLDrv) are
+  converted to RGB8/RGBA8 while copying, with the same conversion as the direct path.
+- Indices are rebased to the smallest index drawn, so the GX limits apply to a draw's range only (index 0xffff,
+  or 0xff with `GX_INDEX8`, means "skip this vertex"; at most 65534 vertices in a range); 8-, 16- and 32-bit
+  index arrays all work this way.
+- What stays on the direct path, per attribute (the others of the draw stay indexed: GX mixes direct and indexed
+  attributes in one vertex): positions with four components (the w divide), byte/int/double data, colours of
+  one or two components or of non-float, non-byte types, constant attributes (point sprite coordinates) and
+  software-generated texture coordinates (sphere map). The whole draw stays direct with GLSL programs, in
+  selection mode, for the flat pass of the stencil emulation, when the range is more than twice the vertex count
+  plus 64 (copying would cost more than it saves), and above 65534 vertices.
+- Strides stay those of the arrays (the GX limit is 255 bytes, which opengx's array state already has).
+- Bench (before -> after, ms submit per frame): client arrays, one draw 12.21 -> 1.93; 100 draws 12.31 -> 2.65;
+  static buffer objects, one draw 6.60 -> 1.65 (the buffer path already used `GX_INDEX16`, but through the
+  per-vertex reader calls); 100 draws 6.77 -> 1.97; UT99-like batches (200 x 50 triangles from one refilled
+  float-colour buffer, two texture units) 12.52 -> 5.55 (1.1 of it the refill). FIFO bytes per 99 triangles:
+  11904 -> 1600 (client), 3104 -> 1600 (buffer objects).
+- Check: `o.indexed` (a 20x20-quad mesh with vertex colours and two texture coordinate sets, unlit and lit:
+  16-bit/32-bit/8-bit indices, `glDrawRangeElements`, one draw per row (`GX_INDEX8`), triangle strips, separate
+  arrays with a 3-component texture coordinate, float colours, 4-component positions (mixed direct + indexed),
+  buffer objects, glDrawArrays, immediate mode, line loops: every path gives the same pixels). The whole suite's
+  checked pixels and read-back regions (an FNV checksum of each) are identical to the build before.
+
 ## Lighting
 
 ### `GL_COLOR_MATERIAL` with `GL_EMISSION` and a colour array

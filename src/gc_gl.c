@@ -2740,6 +2740,14 @@ void glArrayElement(GLint i)
     }
 }
 
+/* Whether a draw may use indexed GX arrays (_ogx_arrays_plan_indexed()): the
+ * fixed pipeline in GL_RENDER mode */
+static inline bool indexed_arrays_possible()
+{
+    return !glparamstate.current_program &&
+        glparamstate.render_mode == GL_RENDER;
+}
+
 static bool setup_draw(const OgxDrawData *draw_data)
 {
     _ogx_efb_set_content_type(OGX_EFB_SCENE);
@@ -2847,9 +2855,24 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
 
     _ogx_gpu_resources_push();
 
+    const GLvoid *index_data = indices;
+    if (glparamstate.bound_vbo_element_array) {
+        index_data = _ogx_vbo_get_data(glparamstate.bound_vbo_element_array,
+                                       indices);
+    }
+    if (indexed_arrays_possible()) {
+        int min, max;
+        _ogx_arrays_index_range(index_data, type, count, &min, &max);
+        if (min >= 0 && max >= 0)
+            _ogx_arrays_plan_indexed(min, max, count + gxmode.loop);
+    }
+
     bool should_draw = setup_draw(&draw_data);
     if (should_draw) {
-        draw_elements_general(&draw_data);
+        if (_ogx_arrays_indexed_planned())
+            _ogx_arrays_draw_indexed_elements(&draw_data, index_data);
+        else
+            draw_elements_general(&draw_data);
         glparamstate.draw_count++;
     }
     draw_done();

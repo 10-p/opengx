@@ -33,6 +33,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "debug.h"
 #include "state.h"
 #include "utils.h"
+#include "texture.h"
 #include "vbo.h"
 
 #include <cassert>
@@ -41,6 +42,9 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <limits>
 #include <ogc/gx.h>
 #include <new>
+#include <malloc.h>
+#include <type_traits>
+#include <ogc/machine/processor.h>
 
 #define MAX_TEXCOORDS 8 /* GX_VA_TEX7 - GX_VA_TEX8 */
 
@@ -217,8 +221,29 @@ static void to_tex2f(const T *components, int num_components, Tex2f tex) {
     }
 }
 
+/* How the GX vertex loader can fetch an attribute through an indexed array
+ * (GX_SetArray + GX_INDEX8/16) instead of receiving its value in the FIFO. */
+enum GxSourceKind : uint8_t {
+    GXS_DIRECT = 0, /* only as direct data (constants, generators, conversions) */
+    GXS_NONE,       /* the attribute sends no data (texture coordinates that
+                       texgen takes from the position or normal) */
+    GXS_GPU,        /* buffer object memory, already flushed: used in place */
+    GXS_RAW,        /* client memory in a GX format: copied for the draw */
+    GXS_COLOR_FLOAT,/* float colour: converted to RGB8/RGBA8 for the draw */
+};
+
+struct GxSource {
+    const char *data;
+    uint16_t stride;
+    uint8_t elem_bytes; /* bytes of one element read from data */
+    uint8_t num_components;
+};
+
 struct AbstractVertexReader {
     AbstractVertexReader(GxVertexFormat format): format(format) {}
+
+    virtual GxSourceKind gx_source(GxSource *src) const { return GXS_DIRECT; }
+    const GxVertexFormat &gx_format() const { return format; }
 
     virtual void setup_draw() {
         GX_SetVtxDesc(format.attribute, GX_DIRECT);
@@ -344,6 +369,7 @@ struct TexCoordProxyVertexReader: public AbstractVertexReader {
      * already sent by another array */
     void process_element(int index) override {}
     void setup_draw() override {}
+    GxSourceKind gx_source(GxSource *src) const override { return GXS_NONE; }
     void get_format(uint8_t *attribute, uint8_t *inputmode,
                     uint8_t *type, uint8_t *size) const override {
         *inputmode = GX_NONE;
@@ -386,6 +412,15 @@ struct VertexReaderBase: public AbstractVertexReader {
         return data == array_data && stride == array_stride;
     }
 
+    GxSourceKind fill_source(GxSource *src, GxSourceKind kind,
+                             int elem_bytes) const {
+        src->data = data;
+        src->stride = stride;
+        src->elem_bytes = elem_bytes;
+        src->num_components = format.num_components;
+        return kind;
+    }
+
     const char *data;
     uint16_t stride;
 };
@@ -403,6 +438,10 @@ struct DirectVboReader: public VertexReaderBase {
         GX_SetVtxDesc(format.attribute, GX_INDEX16);
         GX_SetVtxAttrFmt(GX_VTXFMT0, format.attribute,
                          format.type, format.size, 0);
+    }
+
+    GxSourceKind gx_source(GxSource *src) const override {
+        return fill_source(src, GXS_GPU, format.stride());
     }
 
     void draw_done() override {
@@ -538,6 +577,11 @@ struct SameTypeVertexReader: public GenericVertexReader<T> {
     using GenericVertexReader<T>::GenericVertexReader;
     using GenericVertexReader<T>::elemAt;
     using GenericVertexReader<T>::format;
+    using GenericVertexReader<T>::fill_source;
+
+    GxSourceKind gx_source(GxSource *src) const override {
+        return fill_source(src, GXS_RAW, sizeof(T) * format.num_components);
+    }
 
     void process_element(int index) override {
         const T *ptr = elemAt(index);
@@ -564,6 +608,25 @@ struct ColorVertexReader: public GenericVertexReader<T> {
     using GenericVertexReader<T>::elemAt;
     using GenericVertexReader<T>::format;
     using GenericVertexReader<T>::read_color_component;
+    using GenericVertexReader<T>::fill_source;
+
+    GxSourceKind gx_source(GxSource *src) const override {
+        if constexpr (std::is_same_v<T, float>) {
+            if (format.num_components >= 3)
+                return fill_source(src, GXS_COLOR_FLOAT,
+                                   sizeof(T) * format.num_components);
+        }
+        return GXS_DIRECT;
+    }
+
+    /* The bytes process_element() sends for one element (num_components 3 or
+     * 4), for the converted copy of an indexed draw. */
+    static void convert(const T *ptr, int num_components, uint8_t *out) {
+        out[0] = read_color_component(ptr++);
+        out[1] = read_color_component(ptr++);
+        out[2] = read_color_component(ptr++);
+        if (num_components == 4) out[3] = read_color_component(ptr);
+    }
 
     void process_element(int index) {
         GXColor color;
@@ -592,6 +655,18 @@ struct CoordVertexReader: public GenericVertexReader<T> {
     using GenericVertexReader<T>::elemAt;
     using GenericVertexReader<T>::format;
     using GenericVertexReader<T>::GenericVertexReader;
+    using GenericVertexReader<T>::fill_source;
+
+    /* Floats are sent as they are, except a position's w division; texture
+     * coordinates keep their first two components (GX reads those). */
+    GxSourceKind gx_source(GxSource *src) const override {
+        if constexpr (std::is_same_v<T, float>) {
+            if (format.num_components < 4 && format.size == GX_F32)
+                return fill_source(src, GXS_RAW,
+                                   sizeof(T) * format.num_components);
+        }
+        return GXS_DIRECT;
+    }
 
     void process_element(int index) {
         const T *ptr = elemAt(index);
@@ -618,12 +693,368 @@ static inline VertexReaderBase *get_reader(OgxArrayReader *reader)
     return reinterpret_cast<VertexReaderBase *>(reader);
 }
 
+/* ---------------------------------------------------------------------------
+ * Indexed GX arrays.
+ *
+ * A draw whose attributes the GX vertex loader can fetch itself sends only
+ * indices through the FIFO: GX_SetArray() points each attribute at its data
+ * and the vertex descriptor says GX_INDEX8 or GX_INDEX16. Buffer object data
+ * is used in place (flushed when it was uploaded); client arrays may change
+ * as soon as the draw call returns, so the index range they use is copied
+ * into a ring buffer that the GPU reads (float colours are converted to
+ * bytes on the way). Indices are rebased to the smallest one drawn, so the
+ * GX limits (index 0xffff, or 0xff with GX_INDEX8, means "skip the vertex")
+ * apply to the range of a draw only.
+ */
+
+#define MAX_READERS (sizeof(s_readers) / sizeof(s_readers[0]))
+
+/* The ring: SEGMENTS parts, each fenced by a draw sync token once the
+ * allocations move past it; a part is reused after the GPU passed its fence. */
+#define RING_SIZE (1024 * 1024)
+#define RING_SEGMENTS 16
+#define RING_SEGMENT_SIZE (RING_SIZE / RING_SEGMENTS)
+
+static uint8_t *s_ring = NULL;
+static uint32_t s_ring_pos = 0;
+static int s_ring_segment = 0;
+static uint32_t s_ring_pending = 0; /* segments used since the last fence */
+static struct {
+    uint32_t swap;
+    uint16_t token;
+} s_ring_fence[RING_SEGMENTS];
+
+static uint8_t *ring_alloc(uint32_t size)
+{
+    size = (size + 31) & ~31u;
+    if (size > RING_SIZE / 2) return NULL;
+    if (!s_ring) {
+        s_ring = static_cast<uint8_t*>(memalign(32, RING_SIZE));
+        if (!s_ring) return NULL;
+    }
+
+    uint32_t pos = s_ring_pos;
+    if (pos + size > RING_SIZE) pos = 0;
+    int first = pos / RING_SEGMENT_SIZE;
+    int last = (pos + size - 1) / RING_SEGMENT_SIZE;
+    if (first != s_ring_segment && s_ring_pending) {
+        /* All the draws that used the pending segments are in the FIFO */
+        uint32_t swap = _ogx_swaps_sent();
+        uint16_t token = send_draw_sync_token();
+        for (int i = 0; i < RING_SEGMENTS; i++) {
+            if (!(s_ring_pending & (1u << i))) continue;
+            s_ring_fence[i].swap = swap;
+            s_ring_fence[i].token = token;
+        }
+        s_ring_pending = 0;
+    }
+    for (int i = first; i <= last; i++) {
+        if (i == s_ring_segment && (s_ring_pending & (1u << i))) continue;
+        if (!_ogx_fifo_point_passed(s_ring_fence[i].swap,
+                                    s_ring_fence[i].token)) {
+            GX_Flush();
+            while (!_ogx_fifo_point_passed(s_ring_fence[i].swap,
+                                           s_ring_fence[i].token));
+        }
+    }
+    for (int i = first; i <= last; i++)
+        s_ring_pending |= 1u << i;
+    s_ring_segment = last;
+    s_ring_pos = pos + size;
+    return s_ring + pos;
+}
+
+enum IndexedMode : uint8_t {
+    IDX_DIRECT, /* process_element() */
+    IDX_NONE,   /* nothing is sent */
+    IDX_INDEX,  /* an index into the array set up for this draw */
+};
+
+static struct {
+    bool active;
+    bool all_indexed;
+    uint8_t index_size; /* 1: GX_INDEX8, 2: GX_INDEX16 */
+    uint8_t num_indexed;
+    int min;
+    IndexedMode mode[MAX_READERS];
+    const void *base[MAX_READERS];
+    uint8_t stride[MAX_READERS];
+} s_plan;
+
+/* Copies [start, end) of every group of overlapping client arrays (the
+ * attributes of an interleaved vertex share one copy). */
+struct CopyGroup {
+    const char *start, *end;
+    uint16_t stride;
+    uint8_t *copy;
+};
+
+bool _ogx_arrays_plan_indexed(int min, int max, int count)
+{
+    s_plan.active = false;
+    if (count <= 0 || count >= 65535) return false; /* GX_Begin's u16 count */
+    int range = max - min + 1;
+    if (min < 0 || range > 65535) return false;
+
+    int n = count_attributes();
+    GxSource src[MAX_READERS];
+    GxSourceKind kind[MAX_READERS];
+    int num_indexed = 0, num_direct = 0;
+    bool needs_copy = false;
+    for (int i = 0; i < n; i++) {
+        kind[i] = get_reader(&s_readers[i])->gx_source(&src[i]);
+        if (kind[i] == GXS_DIRECT) num_direct++;
+        else if (kind[i] != GXS_NONE) num_indexed++;
+        if (kind[i] == GXS_RAW || kind[i] == GXS_COLOR_FLOAT) needs_copy = true;
+    }
+    if (num_indexed == 0) return false;
+    /* A copy is worth it while the range is not much larger than the
+     * vertices drawn */
+    if (needs_copy && range > 2 * count + 64) return false;
+
+    CopyGroup groups[MAX_READERS];
+    int num_groups = 0;
+    int group_of[MAX_READERS];
+    for (int i = 0; i < n; i++) {
+        group_of[i] = -1;
+        if (kind[i] != GXS_RAW) continue;
+        const char *start = src[i].data + min * src[i].stride;
+        const char *end = src[i].data + max * src[i].stride + src[i].elem_bytes;
+        int g;
+        for (g = 0; g < num_groups; g++) {
+            if (groups[g].stride == src[i].stride &&
+                start < groups[g].end && groups[g].start < end) break;
+        }
+        if (g == num_groups) {
+            groups[g].start = start;
+            groups[g].end = end;
+            groups[g].stride = src[i].stride;
+            num_groups++;
+        } else {
+            if (start < groups[g].start) groups[g].start = start;
+            if (end > groups[g].end) groups[g].end = end;
+        }
+        group_of[i] = g;
+    }
+    for (int g = 0; g < num_groups; g++) {
+        uint32_t size = groups[g].end - groups[g].start;
+        groups[g].copy = ring_alloc(size);
+        if (!groups[g].copy) return false;
+        memcpy(groups[g].copy, groups[g].start, size);
+        DCStoreRangeNoSync(groups[g].copy, size);
+    }
+
+    for (int i = 0; i < n; i++) {
+        switch (kind[i]) {
+        case GXS_DIRECT:
+            s_plan.mode[i] = IDX_DIRECT;
+            continue;
+        case GXS_NONE:
+            s_plan.mode[i] = IDX_NONE;
+            continue;
+        case GXS_GPU:
+            s_plan.base[i] = src[i].data + min * src[i].stride;
+            s_plan.stride[i] = src[i].stride;
+            break;
+        case GXS_RAW: {
+            const CopyGroup &grp = groups[group_of[i]];
+            s_plan.base[i] = grp.copy +
+                (src[i].data + min * src[i].stride - grp.start);
+            s_plan.stride[i] = src[i].stride;
+            break;
+        }
+        case GXS_COLOR_FLOAT: {
+            int nc = src[i].num_components;
+            int j;
+            /* CLR1 repeats CLR0's array when lighting */
+            for (j = 0; j < i; j++) {
+                if (kind[j] == GXS_COLOR_FLOAT && src[j].data == src[i].data &&
+                    src[j].stride == src[i].stride &&
+                    src[j].num_components == nc) break;
+            }
+            if (j < i) {
+                s_plan.base[i] = s_plan.base[j];
+            } else {
+                uint8_t *out = ring_alloc(range * nc);
+                if (!out) return false;
+                const char *in = src[i].data + min * src[i].stride;
+                for (int v = 0; v < range; v++, in += src[i].stride)
+                    ColorVertexReader<float>::convert(
+                        reinterpret_cast<const float*>(in), nc, out + v * nc);
+                DCStoreRangeNoSync(out, range * nc);
+                s_plan.base[i] = out;
+            }
+            s_plan.stride[i] = nc;
+            break;
+        }
+        }
+        s_plan.mode[i] = IDX_INDEX;
+    }
+
+    s_plan.min = min;
+    s_plan.num_indexed = num_indexed;
+    s_plan.all_indexed = num_direct == 0;
+    s_plan.index_size = range <= 255 ? 1 : 2;
+    s_plan.active = true;
+    return true;
+}
+
+static void setup_indexed_draw()
+{
+    int n = count_attributes();
+    uint8_t input = s_plan.index_size == 1 ? GX_INDEX8 : GX_INDEX16;
+    for (int i = 0; i < n; i++) {
+        VertexReaderBase *r = get_reader(&s_readers[i]);
+        if (s_plan.mode[i] != IDX_INDEX) {
+            r->setup_draw();
+            continue;
+        }
+        const GxVertexFormat &f = r->gx_format();
+        GX_SetArray(f.attribute, const_cast<void*>(s_plan.base[i]),
+                    s_plan.stride[i]);
+        GX_SetVtxDesc(f.attribute, input);
+        GX_SetVtxAttrFmt(GX_VTXFMT0, f.attribute, f.type, f.size, 0);
+    }
+    /* The copies (and buffer object uploads) must reach memory before the
+     * GPU reads them */
+    ppcsync();
+}
+
+/* Sends the vertices count (+ the first again for a loop): index_of(i) is
+ * the array index of the i-th vertex. */
+template <typename F>
+static inline void emit_indexed(int count, bool loop, F index_of)
+{
+    const int min = s_plan.min;
+    const int total = count + loop;
+    if (s_plan.all_indexed) {
+        const int n = s_plan.num_indexed;
+        if (s_plan.index_size == 1) {
+            for (int i = 0; i < total; i++) {
+                uint32_t v = index_of(i < count ? i : 0) - min;
+                uint32_t rep = v * 0x01010101u;
+                int k = n;
+                for (; k >= 4; k -= 4) wgPipe->U32 = rep;
+                if (k >= 2) { wgPipe->U16 = rep; k -= 2; }
+                if (k) wgPipe->U8 = v;
+            }
+        } else {
+            for (int i = 0; i < total; i++) {
+                uint32_t v = index_of(i < count ? i : 0) - min;
+                uint32_t rep = v | (v << 16);
+                int k = n;
+                for (; k >= 2; k -= 2) wgPipe->U32 = rep;
+                if (k) wgPipe->U16 = v;
+            }
+        }
+        return;
+    }
+
+    const int n = count_attributes();
+    for (int i = 0; i < total; i++) {
+        int index = index_of(i < count ? i : 0);
+        uint32_t v = index - min;
+        for (int a = 0; a < n; a++) {
+            switch (s_plan.mode[a]) {
+            case IDX_INDEX:
+                if (s_plan.index_size == 1) wgPipe->U8 = v;
+                else wgPipe->U16 = v;
+                break;
+            case IDX_DIRECT:
+                get_reader(&s_readers[a])->process_element(index);
+                break;
+            case IDX_NONE:
+                break;
+            }
+        }
+    }
+}
+
+bool _ogx_arrays_indexed_planned()
+{
+    return s_plan.active;
+}
+
+void _ogx_arrays_draw_indexed_elements(const OgxDrawData *draw_data,
+                                       const void *indices)
+{
+    bool loop = draw_data->gxmode.loop;
+    int count = draw_data->count;
+    GX_InvVtxCache();
+    GX_Begin(draw_data->gxmode.mode, GX_VTXFMT0, count + loop);
+    switch (draw_data->type) {
+    case GL_UNSIGNED_BYTE: {
+        const uint8_t *idx = static_cast<const uint8_t*>(indices);
+        emit_indexed(count, loop, [idx](int i) { return int(idx[i]); });
+        break;
+    }
+    case GL_UNSIGNED_SHORT: {
+        const uint16_t *idx = static_cast<const uint16_t*>(indices);
+        emit_indexed(count, loop, [idx](int i) { return int(idx[i]); });
+        break;
+    }
+    case GL_UNSIGNED_INT: {
+        const uint32_t *idx = static_cast<const uint32_t*>(indices);
+        emit_indexed(count, loop, [idx](int i) { return int(idx[i]); });
+        break;
+    }
+    }
+    GX_End();
+}
+
+void _ogx_arrays_draw_indexed_arrays(const OgxDrawData *draw_data)
+{
+    bool loop = draw_data->gxmode.loop;
+    int count = draw_data->count, first = draw_data->first;
+    GX_InvVtxCache();
+    GX_Begin(draw_data->gxmode.mode, GX_VTXFMT0, count + loop);
+    emit_indexed(count, loop, [first](int i) { return first + i; });
+    GX_End();
+}
+
+void _ogx_arrays_index_range(const void *indices, GLenum type, int count,
+                             int *min_out, int *max_out)
+{
+    unsigned lo = ~0u, hi = 0;
+    switch (type) {
+    case GL_UNSIGNED_BYTE:
+        for (int i = 0; i < count; i++) {
+            unsigned v = static_cast<const uint8_t*>(indices)[i];
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+        }
+        break;
+    case GL_UNSIGNED_SHORT:
+        for (int i = 0; i < count; i++) {
+            unsigned v = static_cast<const uint16_t*>(indices)[i];
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+        }
+        break;
+    case GL_UNSIGNED_INT:
+        for (int i = 0; i < count; i++) {
+            uint32_t v = static_cast<const uint32_t*>(indices)[i];
+            if (v < lo) lo = v;
+            if (v > hi) hi = v;
+        }
+        break;
+    }
+    /* Ranges that do not fit an int make the plan fail */
+    *min_out = lo > 0x7fffffff ? -1 : int(lo);
+    *max_out = hi > 0x7fffffff ? -1 : int(hi);
+}
+
 void _ogx_arrays_setup_draw(const OgxDrawData *draw_data,
                             OgxDrawFlags flags)
 {
     GX_ClearVtxDesc();
 
     s_draw_flags = flags;
+
+    if (s_plan.active && flags == OGX_DRAW_FLAG_NONE) {
+        setup_indexed_draw();
+        return;
+    }
 
     int num_arrays = s_draw_flags & OGX_DRAW_FLAG_FLAT ?
         1 : count_attributes();
@@ -648,6 +1079,7 @@ void _ogx_arrays_draw_done()
 {
     int num_arrays = count_attributes();
 
+    s_plan.active = false;
     DirectVboReader::s_last_used_vbo = 0;
     for (int i = 0; i < num_arrays; i++) {
         get_reader(&s_readers[i])->draw_done();
