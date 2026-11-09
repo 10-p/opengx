@@ -33,6 +33,8 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "state.h"
 #include "texture.h"
 #include "utils.h"
+#include "arrays.h"
+#include "vbo.h"
 
 #include <malloc.h>
 
@@ -45,10 +47,13 @@ struct _VertexBuffer {
     /* The swap count of that token (tokens restart from 0 at every swap) */
     uint32_t last_sync_swap;
     VertexBuffer *next_unbound;
+    GLenum usage;
+    void *index_lists; /* see _ogx_vbo_index_lists() */
 
     /* The buffer data are stored in the same memory block at the end of this
-     * struct */
-    _Alignas(4) uint8_t data[0];
+     * struct, 32-byte aligned like the block (GX array fetches, display
+     * lists) */
+    _Alignas(32) uint8_t data[0];
 };
 
 #define MAX_VBOS 4096 /* VboType (types.h) must be able to hold MAX_VBOS */
@@ -105,6 +110,7 @@ static void check_releasable_unbound_buffers(bool delete_all)
             _ogx_fifo_point_passed(buffer->last_sync_swap,
                                    buffer->last_sync_token_sent)) {
             /* Buffer is done, we can release it */
+            _ogx_arrays_drop_index_lists(buffer->index_lists);
             free(buffer);
             *prev_ptr = next;
         } else {
@@ -133,6 +139,7 @@ void glDeleteBuffers(GLsizei n, const GLuint *buffers)
     while (n-- > 0) {
         int i = *vbolist++ - 1;
         if (i >= 0 && i < MAX_VBOS && VBO_IS_USED(i)) {
+            _ogx_arrays_drop_index_lists(s_buffers[i]->index_lists);
             free(s_buffers[i]);
             s_buffers[i] = NULL;
         }
@@ -172,7 +179,8 @@ GLboolean glIsBuffer(GLuint buffer)
 }
 
 static void set_buffer_data(GLenum target, GLintptr offset, GLsizeiptr size,
-                            const void *data, bool must_allocate)
+                            const void *data, bool must_allocate,
+                            GLenum usage)
 {
     int index = get_index_for_target(target);
     if (index < 0) return;
@@ -194,17 +202,21 @@ static void set_buffer_data(GLenum target, GLintptr offset, GLsizeiptr size,
                  * now */
                 move_to_unbound_list(buffer);
             } else {
+                _ogx_arrays_drop_index_lists(buffer->index_lists);
                 free(buffer);
             }
         }
-        size = (size + 31) / 32 * 32;
-        buffer = s_buffers[index] = memalign(32, sizeof(VertexBuffer) + size);
+        size_t alloc_size = (size + 31) / 32 * 32;
+        buffer = s_buffers[index] =
+            memalign(32, sizeof(VertexBuffer) + alloc_size);
         if (!buffer) {
             warning("Out of memory allocating a VBO");
             set_error(GL_OUT_OF_MEMORY);
             return;
         }
-        buffer->size = size;
+        buffer->size = alloc_size;
+        buffer->usage = usage;
+        buffer->index_lists = NULL;
         buffer->mapped = false;
         buffer->last_sync_token_sent = 0;
         buffer->next_unbound = NULL;
@@ -228,6 +240,10 @@ static void set_buffer_data(GLenum target, GLintptr offset, GLsizeiptr size,
             }
             buffer->last_sync_token_sent = 0;
         }
+        if (buffer->index_lists) {
+            _ogx_arrays_drop_index_lists(buffer->index_lists);
+            buffer->index_lists = NULL;
+        }
         memcpy(buffer->data + offset, data, size);
         DCStoreRangeNoSync(buffer->data + offset, size);
     }
@@ -236,13 +252,13 @@ static void set_buffer_data(GLenum target, GLintptr offset, GLsizeiptr size,
 void glBufferData(GLenum target, GLsizeiptr size, const void *data,
                   GLenum usage)
 {
-    set_buffer_data(target, 0, size, data, true);
+    set_buffer_data(target, 0, size, data, true, usage);
 }
 
 void glBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size,
                      const void *data)
 {
-    set_buffer_data(target, offset, size, data, false);
+    set_buffer_data(target, offset, size, data, false, 0);
 }
 
 void glGetBufferSubData(GLenum target, GLintptr offset, GLsizeiptr size, void *data)
@@ -269,6 +285,10 @@ void *glMapBuffer(GLenum target, GLenum access)
 
     VertexBuffer *buffer = s_buffers[index];
     buffer->mapped = true;
+    if (buffer->index_lists) {
+        _ogx_arrays_drop_index_lists(buffer->index_lists);
+        buffer->index_lists = NULL;
+    }
     return buffer->data;
 }
 
@@ -330,6 +350,20 @@ void glGetBufferPointerv(GLenum target, GLenum pname, void **params)
 void *_ogx_vbo_get_data(VboType vbo, const void *offset)
 {
     return s_buffers[vbo - 1]->data + (int)offset;
+}
+
+void **_ogx_vbo_index_lists(VboType vbo)
+{
+    int index = vbo - 1;
+    if (index < 0 || index >= MAX_VBOS || !VBO_IS_USED(index)) return NULL;
+    return &s_buffers[index]->index_lists;
+}
+
+GLenum _ogx_vbo_usage(VboType vbo)
+{
+    int index = vbo - 1;
+    if (index < 0 || index >= MAX_VBOS || !VBO_IS_USED(index)) return 0;
+    return s_buffers[index]->usage;
 }
 
 void _ogx_vbo_set_in_use(VboType vbo)

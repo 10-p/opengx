@@ -80,11 +80,15 @@ void _ogx_arrays_reset(void);
  * _ogx_arrays_draw_done(). */
 bool _ogx_arrays_plan_indexed(uint8_t gxmode, int min, int max, int count);
 /* _ogx_arrays_plan_indexed() for glDrawElements (indices: CPU address of
- * the index data) and glDrawArrays */
+ * the index data; vbo/offset: the element buffer, 0 for client indices) and
+ * glDrawArrays; streams drawn more than once become display lists */
 bool _ogx_arrays_plan_elements(uint8_t gxmode, bool loop, int count,
-                               GLenum type, const void *indices);
+                               GLenum type, const void *indices,
+                               VboType vbo, uint32_t offset);
 bool _ogx_arrays_plan_arrays(uint8_t gxmode, bool loop, int first, int count);
 bool _ogx_arrays_indexed_planned(void);
+/* Frees a list of index ranges/display lists of an element buffer */
+void _ogx_arrays_drop_index_lists(void *lists);
 void _ogx_arrays_draw_indexed_elements(const OgxDrawData *draw_data,
                                        const void *indices);
 void _ogx_arrays_draw_indexed_arrays(const OgxDrawData *draw_data);

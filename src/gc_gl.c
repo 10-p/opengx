@@ -2870,7 +2870,9 @@ void glDrawElements(GLenum mode, GLsizei count, GLenum type, const GLvoid *indic
     }
     if (indexed_arrays_possible()) {
         _ogx_arrays_plan_elements(gxmode.mode, gxmode.loop, count, type,
-                                  index_data);
+                                  index_data,
+                                  glparamstate.bound_vbo_element_array,
+                                  (uint32_t)indices);
     }
 
     bool should_draw = setup_draw(&draw_data);

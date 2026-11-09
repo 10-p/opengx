@@ -34,6 +34,8 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include "types.h"
 
+#include <GL/gl.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -44,6 +46,12 @@ void *_ogx_vbo_get_data(VboType vbo, const void *offset);
 /* Mark the given VBO as in use by the GPU */
 void _ogx_vbo_set_in_use(VboType vbo);
 void _ogx_vbo_clear_unbound_buffers(void);
+/* Where the arrays code keeps what it derived from an element buffer's data
+ * (index ranges, index display lists); NULL if the buffer has no storage.
+ * Dropped with _ogx_arrays_drop_index_lists() whenever the data changes. */
+void **_ogx_vbo_index_lists(VboType vbo);
+/* The usage hint given to glBufferData() */
+GLenum _ogx_vbo_usage(VboType vbo);
 
 #ifdef __cplusplus
 } // extern C

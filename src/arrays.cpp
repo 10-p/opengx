@@ -799,6 +799,7 @@ static struct {
     CopyGroup group[MAX_READERS];
     const void *base[MAX_READERS];
     uint8_t stride[MAX_READERS];
+    struct IndexList *list; /* the draw's cached index stream, if any */
 } s_plan;
 
 static int vertices_per_primitive(uint8_t gxmode)
@@ -938,6 +939,7 @@ static void classify_sources()
 bool _ogx_arrays_plan_indexed(uint8_t gxmode, int min, int max, int count)
 {
     s_plan.active = false;
+    s_plan.list = NULL;
     if (count <= 0) return false;
     int range = max - min + 1;
     if (min < 0 || max < min) return false;
@@ -1075,6 +1077,165 @@ static void draw_chunk_direct(uint8_t mode, int from, int to, F index_of)
     set_indexed_descriptors();
 }
 
+/* ---------------------------------------------------------------------------
+ * Index streams kept as GX display lists.
+ *
+ * The indices a draw sends depend only on the index data, the primitive and
+ * the number of indexed attributes: for an element buffer object (until its
+ * data changes) and for glDrawArrays (0, 1, 2, ... rebased) they are the same
+ * every time. Such a stream is compiled into a display list the second time
+ * it is drawn, and called after that: the CPU sends the array pointers and
+ * the call, the GP reads the indices from memory. Display lists hold indices
+ * rebased to the range's first vertex, so they work with buffer objects and
+ * with the copies of client arrays alike.
+ */
+
+#define DL_BUDGET (2 * 1024 * 1024) /* all index display lists */
+#define DL_VARIANTS 3               /* per index range (passes with other
+                                       attributes, other primitives) */
+#define MAX_LISTS_PER_BUFFER 1024
+#define IDENTITY_SLOTS 64
+#define MAX_IDENTITY_COUNT 65534
+
+struct DlVariant {
+    void *dl;
+    uint32_t size;
+    uint8_t gxmode;
+    bool loop;
+    uint8_t num_indexed;
+};
+
+struct IndexList {
+    IndexList *next;
+    uint32_t offset; /* of the indices in the element buffer */
+    int count;
+    GLenum type;
+    int min, max;
+    uint32_t uses;
+    DlVariant var[DL_VARIANTS];
+};
+
+static uint32_t s_dl_bytes = 0;
+static IndexList s_identity[IDENTITY_SLOTS];
+
+static void drop_variants(IndexList *l)
+{
+    for (int i = 0; i < DL_VARIANTS; i++) {
+        if (!l->var[i].dl) continue;
+        _ogx_free_after_gpu(l->var[i].dl);
+        s_dl_bytes -= l->var[i].size;
+        l->var[i].dl = NULL;
+    }
+}
+
+void _ogx_arrays_drop_index_lists(void *head)
+{
+    IndexList *l = static_cast<IndexList*>(head);
+    while (l) {
+        IndexList *next = l->next;
+        drop_variants(l);
+        free(l);
+        l = next;
+    }
+}
+
+/* The cached range of count indices at offset in an element buffer; NULL if
+ * the buffer keeps no more entries */
+static IndexList *element_list(VboType vbo, uint32_t offset, int count,
+                               GLenum type, const void *indices)
+{
+    void **head = _ogx_vbo_index_lists(vbo);
+    if (!head) return NULL;
+    IndexList **prev = reinterpret_cast<IndexList**>(head);
+    int n = 0;
+    for (IndexList *l = *prev; l; prev = &l->next, l = l->next, n++) {
+        if (l->offset != offset || l->count != count || l->type != type)
+            continue;
+        /* Move to the front: draws repeat in the same order every frame */
+        *prev = l->next;
+        l->next = static_cast<IndexList*>(*head);
+        *head = l;
+        return l;
+    }
+    if (n >= MAX_LISTS_PER_BUFFER) return NULL;
+    IndexList *l = static_cast<IndexList*>(calloc(1, sizeof(IndexList)));
+    if (!l) return NULL;
+    l->offset = offset;
+    l->count = count;
+    l->type = type;
+    _ogx_arrays_index_range(indices, type, count, &l->min, &l->max);
+    l->next = static_cast<IndexList*>(*head);
+    *head = l;
+    return l;
+}
+
+static IndexList *identity_list(int count)
+{
+    if (count > MAX_IDENTITY_COUNT) return NULL;
+    IndexList *l = &s_identity[count % IDENTITY_SLOTS];
+    if (l->count != count) {
+        drop_variants(l);
+        l->count = count;
+        l->min = 0;
+        l->max = count - 1;
+        l->uses = 0;
+    }
+    return l;
+}
+
+/* Calls the display list of the planned draw's index stream, compiling it
+ * if it was drawn before. False if the indices must be streamed. */
+template <typename F>
+static bool call_index_list(const OgxDrawData *draw_data, F index_of)
+{
+    IndexList *l = s_plan.list;
+    if (!l || s_plan.chunked || !s_plan.all_indexed) return false;
+    const uint8_t mode = draw_data->gxmode.mode;
+    const bool loop = draw_data->gxmode.loop;
+    const uint8_t n = s_plan.num_indexed;
+    DlVariant *free_slot = NULL;
+    for (int i = 0; i < DL_VARIANTS; i++) {
+        DlVariant &v = l->var[i];
+        if (!v.dl) {
+            if (!free_slot) free_slot = &v;
+            continue;
+        }
+        if (v.gxmode == mode && v.loop == loop && v.num_indexed == n) {
+            GX_InvVtxCache();
+            GX_CallDispList(v.dl, v.size);
+            return true;
+        }
+    }
+    if (l->uses < 2 || !free_slot) return false;
+
+    const int count = draw_data->count, total = count + loop;
+    uint32_t bytes = 3 + uint32_t(total) * n * s_plan.index_size;
+    uint32_t capacity = (bytes + 63) & ~31u;
+    if (s_dl_bytes + capacity > DL_BUDGET) return false;
+    void *dl = memalign(32, capacity);
+    if (!dl) return false;
+    DCInvalidateRange(dl, capacity);
+    GX_BeginDispList(dl, capacity);
+    GX_Begin(mode, GX_VTXFMT0, total);
+    /* Rebased to the range's first index, like the arrays */
+    emit_indexed(0, total, count, index_of);
+    GX_End();
+    uint32_t size = GX_EndDispList();
+    if (size == 0) {
+        free(dl);
+        return false;
+    }
+    free_slot->dl = dl;
+    free_slot->size = size;
+    free_slot->gxmode = mode;
+    free_slot->loop = loop;
+    free_slot->num_indexed = n;
+    s_dl_bytes += capacity;
+    GX_InvVtxCache();
+    GX_CallDispList(dl, size);
+    return true;
+}
+
 template <typename F>
 static void draw_indexed(const OgxDrawData *draw_data, F index_of,
                          bool ascending)
@@ -1082,6 +1243,7 @@ static void draw_indexed(const OgxDrawData *draw_data, F index_of,
     const uint8_t mode = draw_data->gxmode.mode;
     const int count = draw_data->count;
     if (!s_plan.chunked) {
+        if (call_index_list(draw_data, index_of)) return;
         const int total = count + draw_data->gxmode.loop;
         GX_InvVtxCache();
         GX_Begin(mode, GX_VTXFMT0, total);
@@ -1123,19 +1285,36 @@ static void draw_indexed(const OgxDrawData *draw_data, F index_of,
 }
 
 bool _ogx_arrays_plan_elements(uint8_t gxmode, bool loop, int count,
-                               GLenum type, const void *indices)
+                               GLenum type, const void *indices,
+                               VboType vbo, uint32_t offset)
 {
+    IndexList *l = NULL;
     int min, max;
-    _ogx_arrays_index_range(indices, type, count, &min, &max);
+    if (vbo && count > 0 && _ogx_vbo_usage(vbo) != GL_STREAM_DRAW)
+        l = element_list(vbo, offset, count, type, indices);
+    if (l) {
+        min = l->min;
+        max = l->max;
+    } else {
+        _ogx_arrays_index_range(indices, type, count, &min, &max);
+    }
     if (min < 0 || max < 0) return false;
-    return _ogx_arrays_plan_indexed(gxmode, min, max, count + loop);
+    if (!_ogx_arrays_plan_indexed(gxmode, min, max, count + loop)) return false;
+    if (l) l->uses++;
+    s_plan.list = l;
+    return true;
 }
 
 bool _ogx_arrays_plan_arrays(uint8_t gxmode, bool loop, int first, int count)
 {
     if (first < 0 || count <= 0) return false;
-    return _ogx_arrays_plan_indexed(gxmode, first, first + count - 1,
-                                    count + loop);
+    if (!_ogx_arrays_plan_indexed(gxmode, first, first + count - 1,
+                                  count + loop))
+        return false;
+    IndexList *l = identity_list(count);
+    if (l) l->uses++;
+    s_plan.list = l;
+    return true;
 }
 
 bool _ogx_arrays_indexed_planned()

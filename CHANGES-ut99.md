@@ -106,6 +106,28 @@ triangles, 5112 vertices of 44 bytes: position, normal, RGBA8 colour, two textur
 - Check: `o.indexed` "large" checks: 86400 indices in one draw (chunked) and with rows from both ends in turn
   (first chunks drawn directly), and glDrawArrays of 86400 vertices, each the same pixels as one draw per row.
 
+### Buffer objects: aligned storage, index streams as GX display lists
+- Buffer data starts 32-byte aligned (the header is padded); it is flushed once at `glBufferData`/
+  `glBufferSubData`/`glUnmapBuffer` (as before) and the indexed arrays point at it in place: no copy per draw.
+- **Upstream bug:** `glBufferData` rounded the size up to 32 before copying, so it read up to 31 bytes past the
+  caller's data.
+- Index streams that repeat are compiled into GX display lists and called: the indices of an element buffer
+  range (until the buffer's data changes; not for `GL_STREAM_DRAW` buffers) and the ascending indices of
+  `glDrawArrays` (any buffer or client array: the list holds indices rebased to the range's first vertex, the
+  arrays are pointed at that vertex). A stream is compiled the second time it is drawn (`GX_BeginDispList`,
+  `GX_Begin`, the indices, `GX_EndDispList`), then each draw is `GX_SetArray` per attribute and
+  `GX_CallDispList`. Up to three lists per range (passes with other attributes or primitives), 2 MB of lists in
+  all, 1024 ranges per buffer; an element buffer range also keeps its smallest/largest index, so the index
+  scan is done once. A rewrite, `glMapBuffer` or deletion drops the buffer's lists (freed once the GPU passed a
+  draw sync token, as texture storage is).
+- Only draws whose attributes are all indexed (no direct attribute in the vertex) and not chunked use lists.
+- Bench (ms submit per frame, before -> after this step / against the base): static buffer objects, one
+  glDrawElements 1.65 -> 0.06 (base 6.60); 100 glDrawElements 1.96 -> 0.44 (6.77); one glDrawArrays 1.32 -> 0.03
+  (6.25); 100 glDrawArrays 1.57 -> 0.26 (6.41); client arrays, 100 glDrawArrays 3.20 -> 1.90 (11.95, the copies
+  remain). FIFO bytes per 99-triangle draw from buffer objects: 3104 (base) -> 1632 -> 160.
+- Check: `o.indexed`: element buffer drawn four times (streamed, compiled, called), then rewritten with other
+  indices (the new ones are drawn), then restored; glDrawArrays lists through the per-row draws.
+
 ## Lighting
 
 ### `GL_COLOR_MATERIAL` with `GL_EMISSION` and a colour array
