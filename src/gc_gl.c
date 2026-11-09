@@ -2447,6 +2447,34 @@ bool _ogx_setup_render_stages()
         }
 
         GXColor ecol;
+        bool emission_from_array = glparamstate.cs.color_enabled &&
+            glparamstate.lighting.color_material_enabled &&
+            glparamstate.lighting.color_material_mode == GL_EMISSION;
+        if (emission_from_array) {
+            /* The emission is the per-vertex colour, the other material
+             * colours are the material's (vert_color_src is GX_SRC_VTX here,
+             * but no material colour may come from the vertices). Channel 0
+             * passes the vertex colour through unlit (stage 0 adds it to a
+             * black emission register); channel 1 is the lit term,
+             * diffuse * (ambient + lights), with the global ambient scaled so
+             * that diffuse * ambient' = matambient * ambient. The lights'
+             * own ambient and the specular term are not drawn in this mode. */
+            GXColor dcol = gxcol_new_fv(glparamstate.lighting.matdiffuse);
+            float amb[4];
+            for (int i = 0; i < 4; i++) {
+                float d = glparamstate.lighting.matdiffuse[i];
+                float a = glparamstate.lighting.matambient[i] *
+                    glparamstate.lighting.globalambient[i];
+                amb[i] = d > 0.0f ? (a / d > 1.0f ? 1.0f : a / d) : 0.0f;
+            }
+            ecol = color_black;
+            GX_SetChanCtrl(GX_COLOR0A0, GX_FALSE, GX_SRC_REG, GX_SRC_VTX,
+                           0, GX_DF_NONE, GX_AF_NONE);
+            GX_SetChanCtrl(GX_COLOR1A1, GX_TRUE, GX_SRC_REG, GX_SRC_REG,
+                           light_mask.diffuse_mask, GX_DF_CLAMP, GX_AF_SPOT);
+            GX_SetChanMatColor(GX_COLOR1A1, dcol);
+            GX_SetChanAmbColor(GX_COLOR1A1, gxcol_new_fv(amb));
+        } else {
         if (glparamstate.lighting.color_material_enabled &&
             glparamstate.lighting.color_material_mode == GL_EMISSION) {
             ecol = gxcol_new_fv(glparamstate.imm_mode.current_color);
@@ -2462,6 +2490,7 @@ bool _ogx_setup_render_stages()
         // Color1 channel: Multiplies the light raster result with the vertex color. Ambient is set to register (which is black)
         GX_SetChanCtrl(GX_COLOR1A1, GX_TRUE, GX_SRC_REG, vert_color_src, light_mask.diffuse_mask, GX_DF_CLAMP, GX_AF_SPOT);
         GX_SetChanAmbColor(GX_COLOR1A1, color_black);
+        }
 
         // STAGE 0: ambient*vert_color -> cprev
         // In data: d: Raster Color, a: emission color

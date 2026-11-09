@@ -50,6 +50,19 @@ sent upstream on its own. Licence unchanged (BSD-3-Clause, see the file headers)
 - Check: `k.vbo` (1500 buffers drawn at once, each its own colour; a buffer drawn after 200 tokens, rewritten
   after a swap: no hang, the new data, 0.03 ms).
 
+## Lighting
+
+### `GL_COLOR_MATERIAL` with `GL_EMISSION` and a colour array
+- **Upstream bug:** with a colour array enabled, the lit path took every material colour from the vertices
+  (`GX_SRC_VTX` on both channels) and the emission from the *current* colour (`glColor`), so a per-vertex
+  emission (D3D's `EMISSIVEMATERIALSOURCE = COLOR1`, which UC2GLDrv uses for static lighting baked into vertex
+  colours) drew `vertex colour * (ambient + lights) + glColor`: white walls.
+- Now in that mode channel 0 passes the vertex colour through unlit as the emission, and channel 1 is
+  `matdiffuse * (ambient' + lights)` from registers, `ambient' = matambient * globalambient / matdiffuse`
+  (exact when the two material colours are equal, as D3D's default material is). Not drawn in this mode: the
+  lights' own ambient and the specular term (GX has two colour channels).
+- Check: `l.emission` (emission + global ambient + one directional light, and with the light off; within 2).
+
 ## Textures
 
 ### `GL_EXT_paletted_texture` → `GX_TF_CI8` + TLUT
