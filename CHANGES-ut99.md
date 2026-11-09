@@ -64,14 +64,25 @@ sent upstream on its own. Licence unchanged (BSD-3-Clause, see the file headers)
   - `ogx_get_proc_address()` now also strips an `EXT` suffix, and first looks the name up unchanged (for
     functions that only exist with the suffix, like `glColorTableEXT`).
 
-### `GL_EXT_texture_compression_s3tc` (DXT1 only) → `GX_TF_CMPR`
+### `GL_EXT_texture_compression_s3tc`: DXT1 → `GX_TF_CMPR`, DXT3/DXT5 decoded
 - New: `glCompressedTexImage2D` / `glCompressedTexSubImage2D` (also reachable as `...ARB`) for
   `GL_COMPRESSED_RGB_S3TC_DXT1_EXT` and `GL_COMPRESSED_RGBA_S3TC_DXT1_EXT`, any level (levels smaller than
   8x8 go into one padded 32-byte tile). `imageSize` must be exactly `ceil(w/4)*ceil(h/4)*8`
   (else `GL_INVALID_VALUE`). Sub-images must be 4-aligned.
-- **DXT3 and DXT5 → `GL_INVALID_ENUM`**: GX has no explicit/interpolated alpha block format (CMPR is DXT1
-  only). The extension string is advertised anyway because DXT1 is what matters; applications must not assume
-  DXT3/5 work.
+- **DXT3 and DXT5** have no GX block format (CMPR is DXT1 only): `glCompressedTexImage2D` /
+  `glCompressedTexSubImage2D` decode them on the CPU (standard S3TC: the colour half always in four-colour
+  mode, DXT3's 4-bit explicit alpha, DXT5's two alpha endpoints with 3-bit indices in the 8- and 6-alpha modes)
+  into RGBA bytes and store them through the `glTexImage2D` path:
+  - default (`GL_TEXTURE_COMPRESSION_HINT` `GL_DONT_CARE`/`GL_FASTEST`): `GX_TF_RGB5A3`, 2 bytes per texel,
+    **4x the DXT3/5 size** (256x256: 64 KB of DXT5 → 131 KB). Opaque texels keep RGB555, translucent ones
+    become A3 RGB444 (alpha in eighths: DXT5 alpha gradients band).
+  - `glHint(GL_TEXTURE_COMPRESSION_HINT, GL_NICEST)`: `GX_TF_RGBA8`, 4 bytes per texel, **8x the size**
+    (256x256: 262 KB), lossless against the S3TC decode.
+  The hint is read at upload time (it was a no-op before; `glHint` now rejects unknown modes with
+  `GL_INVALID_ENUM`). `imageSize` must be `ceil(w/4)*ceil(h/4)*16`; sub-images must be 4-aligned and go into the
+  texture's decoded storage. The application's unpack state (alignment, row length, skips) is ignored for the
+  decoded rows, as it is for compressed data. Cost (Dolphin, emulated): 256x256 DXT5 → RGB5A3 7.5 ms, → RGBA8
+  6.0 ms per upload (the decode plus the RGBA tiling).
 - Repacking (CPU, ~a memcpy): the 8-byte blocks are reordered from raster order into 32-byte CMPR tiles of 2x2
   blocks (top-left, top-right, bottom-left, bottom-right; tiles in raster order); the two RGB565 endpoint
   colours are byte-swapped to big-endian; in each of the four index bytes (one per texel row) the four 2-bit

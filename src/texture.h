@@ -97,6 +97,10 @@ struct gltexture_;
  * new buffer (a copy of the old one if "keep_contents") and the old buffer is
  * freed once the GPU has passed the current point of the FIFO. */
 void _ogx_texture_make_writable(struct gltexture_ *texture, bool keep_contents);
+
+/* GL_TEXTURE_COMPRESSION_HINT: GL_NICEST stores decoded DXT3/DXT5 as RGBA8 */
+extern GLenum _ogx_texture_compression_hint;
+
 /* Free memory the GPU may still read, once it has passed the current FIFO
  * point */
 void _ogx_free_after_gpu(void *ptr);

@@ -2880,7 +2880,16 @@ void glOrtho(GLdouble left, GLdouble right, GLdouble bottom, GLdouble top, GLdou
 
 void glBlendEquation(GLenum mode) {}
 void glShadeModel(GLenum mode) {}  // In theory we don't have GX equivalent?
-void glHint(GLenum target, GLenum mode) {}
+void glHint(GLenum target, GLenum mode)
+{
+    if (mode != GL_FASTEST && mode != GL_NICEST && mode != GL_DONT_CARE) {
+        set_error(GL_INVALID_ENUM);
+        return;
+    }
+    /* Only the texture compression hint has an effect (decoded DXT3/DXT5) */
+    if (target == GL_TEXTURE_COMPRESSION_HINT)
+        _ogx_texture_compression_hint = mode;
+}
 
 // TODO STUB IMPLEMENTATION
 

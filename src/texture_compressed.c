@@ -42,7 +42,11 @@ POSSIBILITY OF SUCH DAMAGE.
  *   puts the leftmost texel in the lowest two bits, CMPR in the highest two.
  *   The meaning of the indices (and the "c0 <= c1 means three colours plus
  *   transparent" rule) is the same.
- * DXT3 and DXT5 have no GX equivalent and are rejected.
+ * DXT3 and DXT5 have no GX equivalent: they are decoded on the CPU into
+ * RGBA bytes and stored through glTexImage2D() as GX_TF_RGB5A3 (2 bytes per
+ * texel, 4x the DXT5 size: opaque texels RGB555, translucent ones A3 RGB444),
+ * or as GX_TF_RGBA8 (4 bytes per texel) when GL_TEXTURE_COMPRESSION_HINT is
+ * GL_NICEST.
  *
  * GL_OGX_native_texture (GL/gxext.h): the GL_TEXTURE_GX_*_OGX internal
  * formats take data which is already in the GX layout; it's copied as is.
@@ -56,6 +60,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include <GL/gxext.h>
 #include <malloc.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Convert one DXT1 block (as two 32-bit words loaded from little-endian
@@ -96,6 +101,134 @@ static void dxt1_to_cmpr(const uint8_t *src, int bw, int bh,
 static int dxt1_size(int width, int height)
 {
     return ((width + 3) / 4) * ((height + 3) / 4) * 8;
+}
+
+/* GL_TEXTURE_COMPRESSION_HINT (glHint): GL_NICEST stores decoded DXT3/DXT5
+ * images as RGBA8, anything else as RGB5A3. */
+GLenum _ogx_texture_compression_hint = GL_DONT_CARE;
+
+static bool is_dxt35(GLenum internal_format)
+{
+    return internal_format == GL_COMPRESSED_RGBA_S3TC_DXT3_EXT ||
+        internal_format == GL_COMPRESSED_RGBA_S3TC_DXT5_EXT;
+}
+
+static int dxt35_size(int width, int height)
+{
+    return ((width + 3) / 4) * ((height + 3) / 4) * 16;
+}
+
+static void rgb565_to_rgb8(uint16_t c, int *rgb)
+{
+    int r = (c >> 11) & 31, g = (c >> 5) & 63, b = c & 31;
+    rgb[0] = (r << 3) | (r >> 2);
+    rgb[1] = (g << 2) | (g >> 4);
+    rgb[2] = (b << 3) | (b >> 2);
+}
+
+/* Decode a DXT3 or DXT5 image (blocks in raster order, little-endian fields)
+ * into width x height RGBA bytes. The colour half of these blocks is always
+ * the four-colour mode, whatever the order of the endpoints. */
+static void decode_dxt35(const uint8_t *src, bool dxt5, int width, int height,
+                         uint8_t *rgba)
+{
+    int bw = (width + 3) / 4, bh = (height + 3) / 4;
+    for (int by = 0; by < bh; by++) {
+        for (int bx = 0; bx < bw; bx++, src += 16) {
+            uint8_t alpha[16];
+            if (dxt5) {
+                int a[8];
+                a[0] = src[0];
+                a[1] = src[1];
+                if (a[0] > a[1]) {
+                    for (int i = 1; i < 7; i++)
+                        a[i + 1] = ((7 - i) * a[0] + i * a[1] + 3) / 7;
+                } else {
+                    for (int i = 1; i < 5; i++)
+                        a[i + 1] = ((5 - i) * a[0] + i * a[1] + 2) / 5;
+                    a[6] = 0;
+                    a[7] = 255;
+                }
+                uint64_t bits = 0;
+                for (int i = 0; i < 6; i++)
+                    bits |= (uint64_t)src[2 + i] << (8 * i);
+                for (int i = 0; i < 16; i++)
+                    alpha[i] = a[(bits >> (3 * i)) & 7];
+            } else {
+                for (int i = 0; i < 16; i++) {
+                    int nibble = (src[i / 2] >> ((i & 1) * 4)) & 15;
+                    alpha[i] = nibble * 17;
+                }
+            }
+            const uint8_t *cb = src + 8;
+            int colors[4][3];
+            rgb565_to_rgb8(cb[0] | (cb[1] << 8), colors[0]);
+            rgb565_to_rgb8(cb[2] | (cb[3] << 8), colors[1]);
+            for (int k = 0; k < 3; k++) {
+                colors[2][k] = (2 * colors[0][k] + colors[1][k] + 1) / 3;
+                colors[3][k] = (colors[0][k] + 2 * colors[1][k] + 1) / 3;
+            }
+            uint32_t indices = cb[4] | (cb[5] << 8) | (cb[6] << 16) |
+                ((uint32_t)cb[7] << 24);
+            for (int ty = 0; ty < 4; ty++) {
+                int y = by * 4 + ty;
+                if (y >= height) break;
+                for (int tx = 0; tx < 4; tx++) {
+                    int x = bx * 4 + tx;
+                    if (x >= width) continue;
+                    int t = ty * 4 + tx;
+                    const int *c = colors[(indices >> (2 * t)) & 3];
+                    uint8_t *out = rgba + (y * width + x) * 4;
+                    out[0] = c[0];
+                    out[1] = c[1];
+                    out[2] = c[2];
+                    out[3] = alpha[t];
+                }
+            }
+        }
+    }
+}
+
+/* A DXT3/DXT5 image or sub-image as RGBA bytes (NULL when out of memory). */
+static uint8_t *decode_dxt35_image(GLenum format, int width, int height,
+                                   const void *data)
+{
+    uint8_t *rgba = malloc(width * height * 4);
+    if (!rgba) {
+        set_error(GL_OUT_OF_MEMORY);
+        return NULL;
+    }
+    decode_dxt35(data, format == GL_COMPRESSED_RGBA_S3TC_DXT5_EXT, width,
+                 height, rgba);
+    return rgba;
+}
+
+/* The pixel-store state a decoded image needs (tightly packed rows), and the
+ * application's, put back afterwards. */
+typedef struct {
+    uint8_t skip_pixels, skip_rows, alignment;
+    uint16_t row_length;
+} UnpackState;
+
+static UnpackState tight_unpack(void)
+{
+    UnpackState saved = {
+        glparamstate.unpack_skip_pixels, glparamstate.unpack_skip_rows,
+        glparamstate.unpack_alignment, glparamstate.unpack_row_length,
+    };
+    glparamstate.unpack_skip_pixels = 0;
+    glparamstate.unpack_skip_rows = 0;
+    glparamstate.unpack_alignment = 4;
+    glparamstate.unpack_row_length = 0;
+    return saved;
+}
+
+static void restore_unpack(const UnpackState *saved)
+{
+    glparamstate.unpack_skip_pixels = saved->skip_pixels;
+    glparamstate.unpack_skip_rows = saved->skip_rows;
+    glparamstate.unpack_alignment = saved->alignment;
+    glparamstate.unpack_row_length = saved->row_length;
 }
 
 static bool is_dxt1(GLenum internal_format)
@@ -212,8 +345,26 @@ void glCompressedTexImage2D(GLenum target, GLint level, GLenum internal_format,
         return;
     }
 
+    if (is_dxt35(internal_format)) {
+        if (image_size != dxt35_size(width, height)) {
+            set_error(GL_INVALID_VALUE);
+            return;
+        }
+        GLint stored = _ogx_texture_compression_hint == GL_NICEST ?
+            GL_RGBA8 : GL_RGB5_A1;
+        uint8_t *rgba = NULL;
+        if (data) {
+            rgba = decode_dxt35_image(internal_format, width, height, data);
+            if (!rgba) return;
+        }
+        UnpackState saved = tight_unpack();
+        glTexImage2D(target, level, stored, width, height, 0, GL_RGBA,
+                     GL_UNSIGNED_BYTE, rgba);
+        restore_unpack(&saved);
+        free(rgba);
+        return;
+    }
     if (!is_dxt1(internal_format)) {
-        /* This includes DXT3 and DXT5, which GX can't decode */
         set_error(GL_INVALID_ENUM);
         return;
     }
@@ -264,6 +415,21 @@ void glCompressedTexSubImage2D(GLenum target, GLint level,
     gltexture_ *currtex =
         &texture_list[glparamstate.texture_unit[unit].glcurtex];
     OgxTextureInfo ti;
+    if (is_dxt35(format)) {
+        /* Decoded into the texture's RGB5A3/RGBA8 storage */
+        if ((xoffset | yoffset) & 3 || image_size != dxt35_size(width, height)) {
+            set_error(GL_INVALID_VALUE);
+            return;
+        }
+        uint8_t *rgba = decode_dxt35_image(format, width, height, data);
+        if (!rgba) return;
+        UnpackState saved = tight_unpack();
+        glTexSubImage2D(target, level, xoffset, yoffset, width, height,
+                        GL_RGBA, GL_UNSIGNED_BYTE, rgba);
+        restore_unpack(&saved);
+        free(rgba);
+        return;
+    }
     if (!_ogx_texture_get_info(glparamstate.texture_unit[unit].glcurtex, &ti) ||
         !ti.texels || ti.format != GX_TF_CMPR || level > ti.maxlevel) {
         set_error(GL_INVALID_OPERATION);
