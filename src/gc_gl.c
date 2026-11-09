@@ -1441,6 +1441,11 @@ void glClear(GLbitfield mask)
         _ogx_accum_clear();
     }
 
+    /* The colour buffer is cleared only if asked for, and only if the colour
+     * mask allows writing to it */
+    bool clear_color = (mask & GL_COLOR_BUFFER_BIT) && glparamstate.color_update;
+    if (!clear_color && !(mask & GL_DEPTH_BUFFER_BIT)) return;
+
     if (mask & GL_DEPTH_BUFFER_BIT) {
         GX_SetZMode(GX_TRUE, GX_ALWAYS, GX_TRUE);
         GX_SetZCompLoc(GX_DISABLE);
@@ -1467,10 +1472,9 @@ void glClear(GLbitfield mask)
         GX_SetTevOrder(GX_TEVSTAGE0, GX_TEXCOORDNULL, GX_TEXMAP_NULL, GX_COLOR0A0);
     }
 
-    if (mask & GL_COLOR_BUFFER_BIT)
-        GX_SetColorUpdate(GX_TRUE);
-    else
-        GX_SetColorUpdate(GX_TRUE);
+    /* Upstream set GX_TRUE in both branches, so a depth-only clear also
+     * cleared the colour */
+    GX_SetColorUpdate(clear_color ? GX_TRUE : GX_FALSE);
 
     GX_SetBlendMode(GX_BM_NONE, GX_BL_ONE, GX_BL_ZERO, GX_LO_COPY);
     GX_SetCullMode(GX_CULL_NONE);

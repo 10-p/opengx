@@ -167,6 +167,12 @@ Level sizes: `ceil(w/tw) * ceil(h/th) * 32` bytes (`*64` for RGBA8), with `tw x 
 
 ## Framebuffer
 
+### `glClear` colour writes
+- `glClear` drew its clearing quad with `GX_SetColorUpdate(GX_TRUE)` in both branches, so
+  `glClear(GL_DEPTH_BUFFER_BIT)` also cleared the colour buffer to the clear colour (UT's sky zone vanished).
+  Colour writes are now enabled only for `GL_COLOR_BUFFER_BIT`, and only if `glColorMask` allows them; a clear
+  with neither colour nor depth to do draws nothing.
+
 ### `glReadPixels`: GL orientation and a fast path
 - Bug fixed: the EFB copy rectangle used the GL `y` (bottom-left origin) as the EFB top coordinate, so
   `glReadPixels(x, y, ...)` read the rows mirrored around the window's middle (the rows inside the buffer were
