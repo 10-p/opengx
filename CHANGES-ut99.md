@@ -218,6 +218,10 @@ Level sizes: `ceil(w/tw) * ceil(h/th) * 32` bytes (`*64` for RGBA8), with `tw x 
   happens in emulators (Dolphin's "Store EFB copies to texture only").
 
 ## Small GL 1.2-1.4 entry points
+- `glGetIntegerv` framebuffer sizes from the EFB pixel format: `GL_DEPTH_BITS` 24 (16 with
+  `GX_PF_RGB565_Z16`), `GL_RED/GREEN/BLUE_BITS` 8 (6 for RGBA6, 5/6/5 for RGB565), `GL_ALPHA_BITS` 0 (6 for
+  RGBA6). `GL_STENCIL_BITS` is 0 unless the emulated stencil was created with `ogx_stencil_create()` (then 4 or
+  8; upstream always answered 4).
 - `glDrawRangeElements` (the range is a hint; forwards to `glDrawElements`).
 - `glBlendFuncSeparate`: `GX_SetBlendMode()` has one factor pair for colour and alpha. With the default
   `GX_PF_RGB8_Z24` EFB there is no destination alpha, so the RGB pair is exact; with an alpha EFB the alpha

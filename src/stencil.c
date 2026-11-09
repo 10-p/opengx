@@ -626,6 +626,11 @@ OgxEfbBuffer *_ogx_stencil_get_buffer()
     return s_stencil_buffer;
 }
 
+bool _ogx_stencil_wanted(void)
+{
+    return s_wants_stencil;
+}
+
 void ogx_stencil_create(OgxStencilFlags flags)
 {
     s_wants_stencil = true;

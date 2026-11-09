@@ -294,6 +294,8 @@ void glGetFloatv(GLenum pname, GLfloat *params)
     };
 }
 
+extern uint8_t s_efb_pixel_format;
+
 // XXX: Need to finish glGets, important!!!
 void glGetIntegerv(GLenum pname, GLint *params)
 {
@@ -407,7 +409,27 @@ void glGetIntegerv(GLenum pname, GLint *params)
         }
         break;
     case GL_STENCIL_BITS:
-        *params = _ogx_stencil_flags & OGX_STENCIL_8BIT ? 8 : 4;
+        /* There's no stencil in the EFB; the emulated one exists only after
+         * ogx_stencil_create() */
+        if (!_ogx_stencil_wanted())
+            *params = 0;
+        else
+            *params = _ogx_stencil_flags & OGX_STENCIL_8BIT ? 8 : 4;
+        break;
+    case GL_DEPTH_BITS:
+        *params = s_efb_pixel_format == GX_PF_RGB565_Z16 ? 16 : 24;
+        break;
+    case GL_RED_BITS:
+    case GL_BLUE_BITS:
+        *params = s_efb_pixel_format == GX_PF_RGBA6_Z24 ? 6 :
+            s_efb_pixel_format == GX_PF_RGB565_Z16 ? 5 : 8;
+        break;
+    case GL_GREEN_BITS:
+        *params = s_efb_pixel_format == GX_PF_RGBA6_Z24 ? 6 :
+            s_efb_pixel_format == GX_PF_RGB565_Z16 ? 6 : 8;
+        break;
+    case GL_ALPHA_BITS:
+        *params = s_efb_pixel_format == GX_PF_RGBA6_Z24 ? 6 : 0;
         break;
     case GL_STENCIL_CLEAR_VALUE:
         *params = glparamstate.stencil.clear;

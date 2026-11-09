@@ -48,6 +48,8 @@ extern OgxStencilFlags _ogx_stencil_flags;
 void _ogx_stencil_enabled(void);
 void _ogx_stencil_disabled(void);
 void _ogx_stencil_update(void);
+/* true once ogx_stencil_create() was called */
+bool _ogx_stencil_wanted(void);
 void _ogx_stencil_clear(void);
 
 bool _ogx_stencil_setup_tev();
