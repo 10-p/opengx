@@ -63,6 +63,13 @@ sent upstream on its own. Licence unchanged (BSD-3-Clause, see the file headers)
   lights' own ambient and the specular term (GX has two colour channels).
 - Check: `l.emission` (emission + global ambient + one directional light, and with the light off; within 2).
 
+### Light numbers beyond the four opengx has
+- **Upstream bug (memory):** `glLightf`/`glLightfv` indexed the light table with `light - GL_LIGHT0` unchecked;
+  opengx has 4 lights (two GX lights each), so `GL_LIGHT4..7` (valid enums, which a D3D-style device with 8
+  lights sets at start-up) wrote past the table into the GX light objects. They now give `GL_INVALID_ENUM`, and
+  `glGetIntegerv(GL_MAX_LIGHTS)` answers 4 (it answered nothing).
+- Check: `l.emission` (GL_MAX_LIGHTS, GL_LIGHT5/GL_LIGHT7 rejected).
+
 ## Textures
 
 ### `GL_EXT_paletted_texture` → `GX_TF_CI8` + TLUT

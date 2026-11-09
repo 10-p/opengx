@@ -848,6 +848,10 @@ void glLightf(GLenum light, GLenum pname, GLfloat param)
     HANDLE_CALL_LIST(LIGHT, light, pname, &param);
 
     int lnum = light - GL_LIGHT0;
+    if (lnum < 0 || lnum >= MAX_LIGHTS) {
+        set_error(GL_INVALID_ENUM);
+        return;
+    }
 
     switch (pname) {
     case GL_CONSTANT_ATTENUATION:
@@ -876,6 +880,10 @@ void glLightfv(GLenum light, GLenum pname, const GLfloat *params)
     HANDLE_CALL_LIST(LIGHT, light, pname, params);
 
     int lnum = light - GL_LIGHT0;
+    if (lnum < 0 || lnum >= MAX_LIGHTS) {
+        set_error(GL_INVALID_ENUM);
+        return;
+    }
     switch (pname) {
     case GL_SPOT_DIRECTION:
         floatcpy(glparamstate.lighting.lights[lnum].spot_direction, params, 3);

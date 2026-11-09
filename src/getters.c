@@ -346,6 +346,9 @@ void glGetIntegerv(GLenum pname, GLint *params)
     case GL_MAX_TEXTURE_SIZE:
         *params = 1024;
         return;
+    case GL_MAX_LIGHTS:
+        *params = MAX_LIGHTS;
+        return;
     case GL_MAX_VERTEX_ATTRIBS:
         *params = MAX_VERTEX_ATTRIBS;
         return;
