@@ -275,7 +275,7 @@ triangles, 5112 vertices of 44 bytes: position, normal, RGBA8 colour, two textur
   `glCompressedTexSubImage2D` decode them on the CPU (standard S3TC: the colour half always in four-colour
   mode, DXT3's 4-bit explicit alpha, DXT5's two alpha endpoints with 3-bit indices in the 8- and 6-alpha modes)
   into RGBA bytes and store them through the `glTexImage2D` path:
-  - default (`GL_TEXTURE_COMPRESSION_HINT` `GL_DONT_CARE`/`GL_FASTEST`): `GX_TF_RGB5A3`, 2 bytes per texel,
+  - default (`GL_TEXTURE_COMPRESSION_HINT` `GL_DONT_CARE`): `GX_TF_RGB5A3`, 2 bytes per texel,
     **4x the DXT3/5 size** (256x256: 64 KB of DXT5 → 131 KB). Opaque texels keep RGB555, translucent ones
     become A3 RGB444 (alpha in eighths: DXT5 alpha gradients band).
   - `glHint(GL_TEXTURE_COMPRESSION_HINT, GL_NICEST)`: `GX_TF_RGBA8`, 4 bytes per texel, **8x the size**
@@ -285,6 +285,8 @@ triangles, 5112 vertices of 44 bytes: position, normal, RGBA8 colour, two textur
   texture's decoded storage. The application's unpack state (alignment, row length, skips) is ignored for the
   decoded rows, as it is for compressed data. Cost (Dolphin, emulated): 256x256 DXT5 → RGB5A3 7.5 ms, → RGBA8
   6.0 ms per upload (the decode plus the RGBA tiling).
+  - `glHint(GL_TEXTURE_COMPRESSION_HINT, GL_FASTEST)`: kept compressed, see "DXT3/DXT5 as CMPR + an alpha
+    plane" below.
 - Repacking (CPU, ~a memcpy): the 8-byte blocks are reordered from raster order into 32-byte CMPR tiles of 2x2
   blocks (top-left, top-right, bottom-left, bottom-right; tiles in raster order); the two RGB565 endpoint
   colours are byte-swapped to big-endian; in each of the four index bytes (one per texel row) the four 2-bit
@@ -448,3 +450,33 @@ Level sizes: `ceil(w/tw) * ceil(h/th) * 32` bytes (`*64` for RGBA8), with `tw x 
   `GL_PROXY_TEXTURE_2D` (the last proxy `glTexImage2D`, accepted up to 1024x1024). The internal format is
   derived from the GX format (`GL_RGBA8`, `GL_RGB`, `GL_RGB5_A1`, `GL_LUMINANCE(_ALPHA)`, `GL_INTENSITY`,
   `GL_ALPHA`, `GL_COLOR_INDEX8_EXT`, DXT1 RGB/RGBA).
+
+## DXT3/DXT5 as CMPR + an alpha plane (`GL_TEXTURE_COMPRESSION_HINT` `GL_FASTEST`)
+- Opt-in: with `glHint(GL_TEXTURE_COMPRESSION_HINT, GL_FASTEST)` at upload time, `glCompressedTexImage2D` /
+  `glCompressedTexSubImage2D` of DXT3/DXT5 store the colour halves as a `GX_TF_CMPR` texture and the alpha as a
+  `GX_TF_I4` plane of the same size and mipmap layout (a second buffer of the texture object): 1 byte per texel,
+  the DXT size, instead of 2 (RGB5A3) or 4 (RGBA8). Every other hint, format and path is unchanged.
+- Colour: CMPR decodes a block with colour0 <= colour1 as three colours + transparent, a DXT3/DXT5 colour half
+  is always four colours: such blocks get their endpoints swapped and the indices 0<->1, 2<->3 remapped; equal
+  endpoints become one colour (every index 0). No texel is transparent. GX interpolates 5/8 + 3/8 where S3TC
+  says thirds (as for DXT1).
+- Alpha: DXT3's 4 bits are exact in I4; DXT5's interpolated 8-bit alpha is rounded to 4 bits (max error 8/255;
+  RGB5A3 keeps 3 bits of a translucent texel). `OPENGX_DXT5_ALPHA=i8` (environment, read per new texture) stores
+  DXT5 planes as `GX_TF_I8` (exact, 1.5 bytes per texel). `OPENGX_DEBUG=texture` logs per DXT5 level 0 the
+  translucent texels, the I4 and RGB5A3 alpha errors and the smooth-ramp blocks.
+- Drawing: a texture unit whose texture has a plane gets one TEV stage more, before its own: it samples the
+  plane (texture map of its own, the unit's texture coordinate; the plane's texture object is built at bind time
+  with the colour's size, wrap modes, filters and LOD range, so both sample the same texels and levels) and
+  writes the alpha to a TEV register (one for all planes of a draw). The unit's stage reads that register
+  wherever it would read the texture alpha (fixed env modes, `GL_COMBINE` colour and alpha sources).
+- Fail soft: before the texture stages, the stages and texture maps of the units, their planes, the stencil
+  test and the clip planes are counted; if they exceed 16 stages / 8 maps or no TEV register is free, the
+  draw's split textures are converted for good to the decoded RGB5A3 storage (`_ogx_texture_demotions`). A GLSL
+  program's texture (`ogx_shader_get_texobj`) is converted likewise.
+- Housekeeping: the plane follows the colour buffer (level 0 alone or a whole chain; orphaned with it in
+  `_ogx_texture_make_writable`, freed by `glDeleteTextures` and by any re-specification in another format, after
+  the GPU when queued draws may read it). A DXT1 sub-image into such a texture is `GL_INVALID_OPERATION`.
+  `glGetTexLevelParameteriv` reports `GL_COMPRESSED_RGBA_S3TC_DXT3/DXT5_EXT`, 16 bytes per block, 4 alpha bits.
+  `gltexture_` grows by a pointer and a byte of flags (8 KB for the 2048 names).
+- Cost (Dolphin, emulated, 256x256): DXT5 upload 2.8 ms (RGB5A3 10.0 ms), DXT3 1.7 ms; heap 65.5 KB per texture
+  (RGB5A3 131 KB); no RGBA scratch buffer (the decoded path allocates w*h*4 bytes per upload).

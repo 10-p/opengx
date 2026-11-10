@@ -92,6 +92,20 @@ static uint32_t calc_mipmap_offset(int level, int w, int h, uint32_t format)
     return GX_GetTexBufferSize(w, h, size_format(format), GX_TRUE, level);
 }
 
+uint32_t _ogx_texture_buffer_size(int w, int h, uint32_t format, bool chain)
+{
+    return chain ? calc_tex_size(w, h, format) : calc_memory(w, h, format);
+}
+
+void _ogx_texture_drop_alpha(gltexture_ *texture)
+{
+    if (!(texture->alpha_plane & OGX_ALPHA_PLANE)) return;
+    if (texture->in_use) _ogx_free_after_gpu(texture->alpha_texels);
+    else free(texture->alpha_texels);
+    texture->alpha_texels = NULL;
+    texture->alpha_plane = 0;
+}
+
 static u8 gl_filter_to_gx(GLint gl_filter)
 {
     switch (gl_filter) {
@@ -215,14 +229,35 @@ void _ogx_texture_make_writable(gltexture_ *texture, bool keep_contents)
     OgxTextureInfo ti;
     texture_get_info(&texture->texobj, &ti);
     /* Buffers hold either level 0 only or a full chain */
-    uint32_t size = ti.minlevel == 0 && ti.maxlevel == 0 ?
-        calc_memory(ti.width, ti.height, ti.format) :
-        calc_tex_size(ti.width, ti.height, ti.format);
+    bool chain = !(ti.minlevel == 0 && ti.maxlevel == 0);
+    uint32_t size = _ogx_texture_buffer_size(ti.width, ti.height, ti.format,
+                                             chain);
     void *texels = memalign(32, size);
+    void *alpha = NULL;
+    uint32_t alpha_size = 0;
+    if (texels && (texture->alpha_plane & OGX_ALPHA_PLANE)) {
+        /* The alpha plane has the same layout */
+        alpha_size = _ogx_texture_buffer_size(ti.width, ti.height,
+                                              OGX_ALPHA_PLANE_FORMAT(texture),
+                                              chain);
+        alpha = memalign(32, alpha_size);
+        if (!alpha) {
+            free(texels);
+            texels = NULL;
+        }
+    }
     if (!texels) {
         /* No memory for a copy: wait for the GPU instead */
         GX_DrawDone();
         return;
+    }
+    if (alpha) {
+        if (keep_contents) {
+            memcpy(alpha, texture->alpha_texels, alpha_size);
+            DCFlushRange(alpha, alpha_size);
+        }
+        _ogx_free_after_gpu(texture->alpha_texels);
+        texture->alpha_texels = alpha;
     }
     if (keep_contents) {
         memcpy(texels, old, size);
@@ -453,6 +488,9 @@ static void component_sizes(GLint internal_format, int sizes[6])
     case GL_INTENSITY: sizes[5] = 8; break;
     case GL_ALPHA: sizes[3] = 8; break;
     case GL_LUMINANCE4: sizes[4] = 4; break;
+    case GL_COMPRESSED_RGBA_S3TC_DXT3_EXT:
+    case GL_COMPRESSED_RGBA_S3TC_DXT5_EXT: sizes[3] = 4; /* the alpha plane */
+        sizes[0] = sizes[2] = 5; sizes[1] = 6; break;
     case GL_COMPRESSED_RGBA_S3TC_DXT1_EXT: sizes[3] = 1; /* fall through */
     case GL_COMPRESSED_RGB_S3TC_DXT1_EXT:
         sizes[0] = sizes[2] = 5; sizes[1] = 6; break;
@@ -485,6 +523,14 @@ void glGetTexLevelParameteriv(GLenum target, GLint level,
             internal_format = gx_format_to_gl(ti.format, &ti.ud);
             compressed = ti.format == GX_TF_CMPR;
             compressed_size = ((width + 3) / 4) * ((height + 3) / 4) * 8;
+            uint8_t ap = texture_list[curr_tex()].alpha_plane;
+            if (ap & OGX_ALPHA_PLANE) {
+                /* The image as the application gave it */
+                internal_format = (ap & OGX_ALPHA_PLANE_DXT5) ?
+                    GL_COMPRESSED_RGBA_S3TC_DXT5_EXT :
+                    GL_COMPRESSED_RGBA_S3TC_DXT3_EXT;
+                compressed_size *= 2;
+            }
         }
     } else {
         set_error(GL_INVALID_ENUM);
@@ -812,8 +858,8 @@ void _ogx_texture_commit(GXTexObj *texobj, const OgxTextureInfo *ti)
                       ti->width, ti->height, ti->format, ti->wraps, ti->wrapt,
                       GX_TRUE);
     }
-    GX_InitTexObjLOD(texobj, ti->min_filter, ti->mag_filter,
-                     ti->minlevel, ti->maxlevel, 0, GX_ENABLE, GX_ENABLE, GX_ANISO_1);
+    _ogx_texture_init_lod(texobj, ti->min_filter, ti->mag_filter,
+                          ti->minlevel, ti->maxlevel);
     GX_InitTexObjUserData(texobj, ti->ud.ptr);
 }
 
@@ -839,6 +885,9 @@ void glTexImage2D(GLenum target, GLint level, GLint internalFormat, GLsizei widt
 
     gltexture_ *currtex = &texture_list[tex_id];
     GXTexObj *texobj = &currtex->texobj;
+
+    /* An image in another format replaces a DXT3/DXT5 alpha plane */
+    _ogx_texture_drop_alpha(currtex);
 
     /* Instead of waiting for the GPU (upstream did a GX_DrawDone() here),
      * give the texture a new buffer if queued draws may still read it. The
@@ -968,6 +1017,7 @@ void glDeleteTextures(GLsizei n, const GLuint *textures)
             }
             if (texture_list[i].tlut)
                 _ogx_tlut_free(texture_list[i].tlut, in_use);
+            _ogx_texture_drop_alpha(&texture_list[i]);
             memset(&texture_list[i], 0, sizeof(texture_list[i]));
         }
     }

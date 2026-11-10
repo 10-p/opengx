@@ -98,8 +98,32 @@ struct gltexture_;
  * freed once the GPU has passed the current point of the FIFO. */
 void _ogx_texture_make_writable(struct gltexture_ *texture, bool keep_contents);
 
-/* GL_TEXTURE_COMPRESSION_HINT: GL_NICEST stores decoded DXT3/DXT5 as RGBA8 */
+/* GL_TEXTURE_COMPRESSION_HINT: GL_NICEST stores decoded DXT3/DXT5 as RGBA8,
+ * GL_FASTEST keeps them compressed as CMPR + an alpha plane */
 extern GLenum _ogx_texture_compression_hint;
+
+/* The LOD parameters every texture object gets (filters and LOD range come
+ * from the GL state; bias, clamp, edge LOD and anisotropy are fixed). An
+ * alpha plane is set up with the same call, so both planes of a texture
+ * sample the same mipmap levels. */
+static inline void _ogx_texture_init_lod(GXTexObj *obj, u8 min_filter,
+                                         u8 mag_filter, f32 minlod, f32 maxlod)
+{
+    GX_InitTexObjLOD(obj, min_filter, mag_filter, minlod, maxlod, 0,
+                     GX_ENABLE, GX_ENABLE, GX_ANISO_1);
+}
+
+/* Size of a texel buffer holding level 0 only ("chain" false) or a whole
+ * mipmap chain of a w x h texture in the given format */
+uint32_t _ogx_texture_buffer_size(int w, int h, uint32_t format, bool chain);
+/* Free the alpha plane of a texture (after the GPU, if queued draws may
+ * read it); the texture is a plain CMPR one afterwards */
+void _ogx_texture_drop_alpha(struct gltexture_ *texture);
+/* Turn a texture with an alpha plane into the decoded storage (RGB5A3), for
+ * the draws that have no room for the second TEV stage; false if out of
+ * memory (the texture is left as it was). */
+bool _ogx_texture_split_demote(GLuint texture_name);
+extern uint32_t _ogx_texture_demotions; /* statistics, for tests */
 
 /* Free memory the GPU may still read, once it has passed the current FIFO
  * point */

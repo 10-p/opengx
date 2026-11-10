@@ -107,7 +107,21 @@ typedef struct gltexture_
     /* Set when the texture is bound to a TEV stage: draws in the FIFO may
      * still read its texels, see _ogx_texture_make_writable() */
     uint8_t in_use;
+    /* OGX_ALPHA_PLANE_* flags, 0 for every texture but a DXT3/DXT5 one kept
+     * compressed (GL_TEXTURE_COMPRESSION_HINT GL_FASTEST): its texobj holds
+     * the colour as GX_TF_CMPR and alpha_texels the alpha as GX_TF_I4 (or
+     * GX_TF_I8) with the colour's size and mipmap layout (the buffer holds
+     * level 0 alone or a whole chain, as the colour's); a second TEV stage
+     * samples it (texture_unit.c). */
+    uint8_t alpha_plane;
+    void *alpha_texels;
 } gltexture_;
+
+#define OGX_ALPHA_PLANE 0x01    /* alpha_texels is valid */
+#define OGX_ALPHA_PLANE_I8 0x02 /* GX_TF_I8, else GX_TF_I4 */
+#define OGX_ALPHA_PLANE_DXT5 0x04 /* uploaded as DXT5, else DXT3 */
+#define OGX_ALPHA_PLANE_FORMAT(t) \
+    (((t)->alpha_plane & OGX_ALPHA_PLANE_I8) ? GX_TF_I8 : GX_TF_I4)
 
 typedef enum {
     OGX_TEXGEN_S = 1 << 0,

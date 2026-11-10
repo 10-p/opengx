@@ -34,6 +34,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "opengx.h"
 #include "shader.h"
 #include "state.h"
+#include "texture.h"
 #include "utils.h"
 
 #include <GL/gl.h>
@@ -122,6 +123,8 @@ void ogx_shader_set_mvp_gl(const GLfloat *matrix)
 GXTexObj *ogx_shader_get_texobj(int texture_unit)
 {
     OgxTextureUnit *tu = &glparamstate.texture_unit[texture_unit];
+    /* A program samples one texture object: no alpha plane */
+    _ogx_texture_split_demote(tu->glcurtex);
     texture_list[tu->glcurtex].in_use = 1;
     return &texture_list[tu->glcurtex].texobj;
 }
