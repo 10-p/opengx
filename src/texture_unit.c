@@ -108,10 +108,13 @@ typedef struct {
                              "source" */
 } TevSource;
 
+/* tex_alpha / tex_alpha_a: where the texture alpha is read from (GX_CC_TEXA /
+ * GX_CA_TEXA, or the register the alpha plane stage wrote) */
 static TevSource gl_rgbsource_to_gx(GLenum source, GLenum operand,
                                     u8 prev_rgb, u8 prev_alpha,
                                     u8 raster_rgb, u8 raster_alpha,
-                                    bool tex_opaque, bool tex_alpha_only)
+                                    bool tex_opaque, bool tex_alpha_only,
+                                    u8 tex_alpha)
 {
     TevSource ret = { GX_CC_ZERO, false };
     if (operand == GL_ONE_MINUS_SRC_COLOR) {
@@ -130,7 +133,7 @@ static TevSource gl_rgbsource_to_gx(GLenum source, GLenum operand,
             ret.source = tex_alpha_only ? GX_CC_ZERO : GX_CC_TEXC;
             break;
         case GL_SRC_ALPHA:
-            ret.source = tex_opaque ? GX_CC_ONE : GX_CC_TEXA;
+            ret.source = tex_opaque ? GX_CC_ONE : tex_alpha;
             break;
         }
         break;
@@ -157,7 +160,7 @@ static TevSource gl_rgbsource_to_gx(GLenum source, GLenum operand,
 
 static TevSource gl_alphasource_to_gx(GLenum source, GLenum operand,
                                       u8 prev_alpha, u8 raster_alpha,
-                                      bool tex_opaque)
+                                      bool tex_opaque, u8 tex_alpha_a)
 {
     TevSource ret = { GX_CA_ZERO, false };
     /* For the alpha channel, operand can only be either GL_SRC_ALPHA or
@@ -167,7 +170,7 @@ static TevSource gl_alphasource_to_gx(GLenum source, GLenum operand,
     }
 
     switch (source) {
-    case GL_TEXTURE: ret.source = tex_opaque ? CA_ONE : GX_CA_TEXA; break;
+    case GL_TEXTURE: ret.source = tex_opaque ? CA_ONE : tex_alpha_a; break;
     case GL_PREVIOUS: ret.source = prev_alpha; break;
     case GL_CONSTANT: ret.source = GX_CA_KONST; break;
     case GL_PRIMARY_COLOR: ret.source = raster_alpha; break;
@@ -421,7 +424,8 @@ static TevInput compute_tev_input(GLenum combine_func, u8 stage, GXColor color,
 static void setup_combine_operation(const OgxTextureUnit *te, u8 stage,
                                     u8 prev_rgb, u8 prev_alpha,
                                     u8 raster_rgb, u8 raster_alpha,
-                                    bool tex_opaque, bool tex_alpha_only)
+                                    bool tex_opaque, bool tex_alpha_only,
+                                    u8 tex_alpha_c, u8 tex_alpha_a)
 {
     TevSource source_rgb[3];
     TevSource source_alpha[3];
@@ -431,11 +435,12 @@ static void setup_combine_operation(const OgxTextureUnit *te, u8 stage,
                                            te->operand_rgb[i],
                                            prev_rgb, prev_alpha,
                                            raster_rgb, raster_alpha,
-                                           tex_opaque, tex_alpha_only);
+                                           tex_opaque, tex_alpha_only,
+                                           tex_alpha_c);
         source_alpha[i] = gl_alphasource_to_gx(te->source_alpha[i],
                                                te->operand_alpha[i],
                                                prev_alpha, raster_alpha,
-                                               tex_opaque);
+                                               tex_opaque, tex_alpha_a);
     }
 
     TevInput rgb = compute_tev_input(te->combine_rgb, stage, te->color,
@@ -454,12 +459,20 @@ static void setup_combine_operation(const OgxTextureUnit *te, u8 stage,
                      GX_TRUE, GX_TEVPREV);
 }
 
+/* alpha_reg: for a texture with an alpha plane, the TEV register (0..2)
+ * the previous stage wrote its alpha to; 0xff otherwise */
 static void setup_texture_stage(const OgxTextureUnit *tu,
                                 u8 stage, u8 tex_coord, u8 tex_map,
                                 u8 prev_rgb, u8 prev_alpha,
                                 u8 raster_rgb, u8 raster_alpha,
-                                u8 channel)
+                                u8 channel, u8 alpha_reg)
 {
+    u8 tex_alpha_c = GX_CC_TEXA, tex_alpha_a = GX_CA_TEXA;
+    if (alpha_reg != 0xff) {
+        /* Multiply by two because there are alpha registers in between */
+        tex_alpha_c = GX_CC_A0 + alpha_reg * 2;
+        tex_alpha_a = GX_CA_A0 + alpha_reg;
+    }
     gltexture_ *texture = &texture_list[tu->glcurtex];
     OgxTextureUserData ud = TEXTURE_USER_DATA(&texture->texobj);
     /* Base formats without alpha (GL_RGB, GL_LUMINANCE) or without colour
@@ -472,13 +485,13 @@ static void setup_texture_stage(const OgxTextureUnit *tu,
     case GL_REPLACE:
         // In data: a: Texture Color
         GX_SetTevColorIn(stage, GX_CC_TEXC, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO);
-        GX_SetTevAlphaIn(stage, GX_CA_TEXA, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO);
+        GX_SetTevAlphaIn(stage, tex_alpha_a, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO);
         break;
     case GL_ADD:
         /* In data: d: Texture Color a: raster value, Operation: a+d
          * Alpha gets multiplied. */
         GX_SetTevColorIn(stage, prev_rgb, GX_CC_ZERO, GX_CC_ZERO, GX_CC_TEXC);
-        GX_SetTevAlphaIn(stage, GX_CA_ZERO, prev_alpha, GX_CA_TEXA, GX_CA_ZERO);
+        GX_SetTevAlphaIn(stage, GX_CA_ZERO, prev_alpha, tex_alpha_a, GX_CA_ZERO);
         break;
     case GL_BLEND:
         /* In data: c: Texture Color, a: raster value, b: tex env
@@ -486,18 +499,18 @@ static void setup_texture_stage(const OgxTextureUnit *tu,
          * Until we implement GL_TEXTURE_ENV_COLOR, use white (GX_CC_ONE) for
          * the tex env color. */
         GX_SetTevColorIn(stage, prev_rgb, GX_CC_ONE, GX_CC_TEXC, GX_CC_ZERO);
-        GX_SetTevAlphaIn(stage, GX_CA_ZERO, prev_alpha, GX_CA_TEXA, GX_CA_ZERO);
+        GX_SetTevAlphaIn(stage, GX_CA_ZERO, prev_alpha, tex_alpha_a, GX_CA_ZERO);
         break;
     case GL_COMBINE:
         setup_combine_operation(tu, stage, prev_rgb, prev_alpha,
                                 raster_rgb, raster_alpha, tex_opaque,
-                                tex_alpha_only);
+                                tex_alpha_only, tex_alpha_c, tex_alpha_a);
         break;
     case GL_MODULATE:
     default:
         // In data: c: Texture Color b: raster value, Operation: b*c
         GX_SetTevColorIn(stage, GX_CC_ZERO, prev_rgb, GX_CC_TEXC, GX_CC_ZERO);
-        GX_SetTevAlphaIn(stage, GX_CA_ZERO, prev_alpha, GX_CA_TEXA, GX_CA_ZERO);
+        GX_SetTevAlphaIn(stage, GX_CA_ZERO, prev_alpha, tex_alpha_a, GX_CA_ZERO);
         break;
     }
     if (tu->mode != GL_COMBINE) {
@@ -554,6 +567,86 @@ static void setup_texture_stage_matrix(const OgxTextureUnit *tu,
     GX_LoadTexMtxImm(m, dtt_matrix, GX_MTX3x4);
 }
 
+/* The stage before a texture with an alpha plane: it samples the plane
+ * (GX_TF_I4/I8: alpha = I) with the texture's coordinates and stores it in
+ * TEV register "alpha_reg"; PREV is untouched. The plane's texture object
+ * mirrors the colour's size, wrap modes, filters and LOD range, so both
+ * planes sample the same texels of the same levels (the size is the same,
+ * so the shared texture coordinate gets the same scale). */
+static void setup_alpha_plane_stage(gltexture_ *texture, u8 stage,
+                                    u8 tex_coord, u8 tex_map, u8 alpha_reg)
+{
+    const GXTexObj *color = &texture->texobj;
+    GXTexObj plane;
+    u8 min_filter, mag_filter;
+    f32 minlod, maxlod;
+    GX_InitTexObj(&plane, texture->alpha_texels,
+                  GX_GetTexObjWidth(color), GX_GetTexObjHeight(color),
+                  OGX_ALPHA_PLANE_FORMAT(texture),
+                  GX_GetTexObjWrapS(color), GX_GetTexObjWrapT(color),
+                  GX_GetTexObjMipMap(color));
+    GX_GetTexObjFilterMode(color, &min_filter, &mag_filter);
+    GX_GetTexObjLOD(color, &minlod, &maxlod);
+    _ogx_texture_init_lod(&plane, min_filter, mag_filter, minlod, maxlod);
+    GX_LoadTexObj(&plane, tex_map);
+
+    u8 reg = GX_TEVREG0 + alpha_reg;
+    GX_SetTevOrder(stage, tex_coord, tex_map, GX_COLORNULL);
+    GX_SetTevColorIn(stage, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO, GX_CC_ZERO);
+    GX_SetTevAlphaIn(stage, GX_CA_ZERO, GX_CA_ZERO, GX_CA_ZERO, GX_CA_TEXA);
+    GX_SetTevColorOp(stage, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE,
+                     reg);
+    GX_SetTevAlphaOp(stage, GX_TEV_ADD, GX_TB_ZERO, GX_CS_SCALE_1, GX_TRUE,
+                     reg);
+}
+
+/* Textures with an alpha plane cost a TEV stage and a texture map more each,
+ * and one TEV register for all of them; the stencil and clip plane stages,
+ * set up after the texture stages, need theirs too. If that does not fit,
+ * those textures go back to the decoded storage (never a wrong picture).
+ * Returns the register for the alpha planes, or 0xff if none is used. */
+static u8 alpha_planes_prepare(void)
+{
+    int units = 0, planes = 0;
+    for (int tex = 0; tex < MAX_TEXTURE_UNITS; tex++) {
+        if (!(glparamstate.texture_enabled & (1 << tex))) continue;
+        OgxTextureUnit *tu = &glparamstate.texture_unit[tex];
+        if (!tu->array_reader && !tu->gen_enabled) continue;
+        units++;
+        if (texture_list[tu->glcurtex].alpha_plane & OGX_ALPHA_PLANE)
+            planes++;
+    }
+    if (planes == 0) return 0xff;
+
+    int stages = units + planes, maps = units + planes;
+    if (glparamstate.stencil.enabled) {
+        stages++;
+        maps++;
+    }
+    if (glparamstate.clip_plane_mask != 0) {
+        stages += (__builtin_popcount(glparamstate.clip_plane_mask) + 1) / 2;
+        maps++;
+    }
+    const OgxGpuResources *r = ogx_gpu_resources;
+    if (r->tevstage_first + stages <= r->tevstage_end &&
+        r->texmap_first + maps <= r->texmap_end &&
+        r->tevreg_first < r->tevreg_end) {
+        return ogx_gpu_resources->tevreg_first++;
+    }
+
+    warning("No room for %d alpha plane stages: textures decoded", planes);
+    for (int tex = 0; tex < MAX_TEXTURE_UNITS; tex++) {
+        if (!(glparamstate.texture_enabled & (1 << tex))) continue;
+        GLuint name = glparamstate.texture_unit[tex].glcurtex;
+        if (!_ogx_texture_split_demote(name)) {
+            /* Out of memory for the decoded copy: the texture is drawn
+             * without its alpha plane */
+            warning("Texture %u: no memory to decode it", name);
+        }
+    }
+    return 0xff;
+}
+
 void _ogx_setup_texture_stages(u8 raster_reg_index, u8 channel)
 {
     u8 raster_rgb, raster_alpha;
@@ -567,6 +660,7 @@ void _ogx_setup_texture_stages(u8 raster_reg_index, u8 channel)
 
     u8 prev_rgb = raster_rgb;
     u8 prev_alpha = raster_alpha;
+    u8 alpha_reg = alpha_planes_prepare();
 
     for (int tex = 0; tex < MAX_TEXTURE_UNITS; tex++) {
         if (!(glparamstate.texture_enabled & (1 << tex))) continue;
@@ -582,14 +676,25 @@ void _ogx_setup_texture_stages(u8 raster_reg_index, u8 channel)
             continue;
         }
 
-        u8 stage = GX_TEVSTAGE0 + ogx_gpu_resources->tevstage_first++;
         u8 tex_coord = GX_TEXCOORD0 + ogx_gpu_resources->texcoord_first++;
-        u8 tex_map = GX_TEXMAP0 + ogx_gpu_resources->texmap_first++;
         u8 dtt_matrix = GX_DTTMTX0 + ogx_gpu_resources->dttmtx_first++ * 3;
+        gltexture_ *texture = &texture_list[tu->glcurtex];
+        u8 unit_alpha_reg = 0xff;
+        if (alpha_reg != 0xff && (texture->alpha_plane & OGX_ALPHA_PLANE)) {
+            u8 plane_stage = GX_TEVSTAGE0 +
+                ogx_gpu_resources->tevstage_first++;
+            u8 plane_map = GX_TEXMAP0 + ogx_gpu_resources->texmap_first++;
+            setup_alpha_plane_stage(texture, plane_stage, tex_coord,
+                                    plane_map, alpha_reg);
+            unit_alpha_reg = alpha_reg;
+        }
+        u8 stage = GX_TEVSTAGE0 + ogx_gpu_resources->tevstage_first++;
+        u8 tex_map = GX_TEXMAP0 + ogx_gpu_resources->texmap_first++;
 
         setup_texture_stage(tu, stage, tex_coord, tex_map,
                             prev_rgb, prev_alpha,
-                            raster_rgb, raster_alpha, channel);
+                            raster_rgb, raster_alpha, channel,
+                            unit_alpha_reg);
 
         if (input_coordinates == GX_TG_POS || input_coordinates == GX_TG_NRM) {
             u8 matrix_src = GX_TEXMTX0 + ogx_gpu_resources->texmtx_first++ * 3;
