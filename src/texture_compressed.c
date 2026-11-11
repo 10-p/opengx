@@ -243,7 +243,7 @@ static void restore_unpack(const UnpackState *saved)
 /* ---------------------------------------------------------------------
  * DXT3/DXT5 kept compressed (GL_TEXTURE_COMPRESSION_HINT GL_FASTEST): the
  * colour halves become a CMPR texture, the alpha a GX_TF_I4 plane (or
- * GX_TF_I8, OPENGX_DXT5_ALPHA below) of the same size and mipmap layout,
+ * GX_TF_I8, dxt5_alpha_i8() below) of the same size and mipmap layout,
  * which texture_unit.c samples in a TEV stage of its own. 1 byte per texel
  * (the DXT3/DXT5 size) instead of 2 (RGB5A3) or 4 (RGBA8); DXT3's 4-bit
  * alpha is exact in I4, DXT5's interpolated alpha is rounded to 4 bits
@@ -350,13 +350,68 @@ static void alpha_stats_block(AlphaStats *st, const uint8_t a[16])
     if (distinct >= 4 && mx - mn <= 51) st->gradient_blocks++;
 }
 
-/* OPENGX_DXT5_ALPHA: "i4" (the default) or "i8" (DXT5 alpha planes in 8
- * bits: 1.5 bytes per texel, exact) */
-static bool dxt5_alpha_i8(void)
+/* The alpha error of a DXT5 image stored as I4 and as RGB5A3 (the decoded
+ * storage, 3 bits for a translucent texel), summed over the texels of
+ * (a sample of) its blocks: each block's 8 palette entries are measured
+ * once, then counted by index. */
+static uint8_t s_err4[256], s_err3[256];
+
+static void dxt5_alpha_errors(const uint8_t *src, int blocks,
+                              uint32_t *i4_sum, uint32_t *a3_sum)
 {
-    /* Read for every new texture (a few environment entries on the Wii) */
+    if (!s_err3[1]) {
+        for (int v = 0; v < 256; v++) {
+            int a3 = (v * 7 + 127) / 255;
+            s_err4[v] = abs(v - alpha_to_4(v) * 17);
+            s_err3[v] = abs(v - (a3 == 7 ? 255 :
+                                 (a3 << 5) | (a3 << 2) | (a3 >> 1)));
+        }
+    }
+    uint32_t e4_total = 0, e3_total = 0;
+    /* A mean is all that is needed: at most about 512 blocks, evenly
+     * spread */
+    int step = blocks > 512 ? blocks / 512 : 1;
+    for (int n = 0; n < blocks; n += step, src += 16 * step) {
+        /* How often each palette entry is used: two 24-bit halves of
+         * eight 3-bit indices */
+        uint8_t count[8] = { 0 };
+        uint32_t lo = src[2] | (src[3] << 8) | (src[4] << 16);
+        uint32_t hi = src[5] | (src[6] << 8) | (src[7] << 16);
+        for (int i = 0; i < 8; i++, lo >>= 3, hi >>= 3) {
+            count[lo & 7]++;
+            count[hi & 7]++;
+        }
+        int a0 = src[0], a1 = src[1];
+        for (int i = 0; i < 8; i++) {
+            if (!count[i]) continue;
+            int v;
+            if (i == 0) v = a0;
+            else if (i == 1) v = a1;
+            else if (a0 > a1) v = ((8 - i) * a0 + (i - 1) * a1 + 3) / 7;
+            else if (i < 6) v = ((6 - i) * a0 + (i - 1) * a1 + 2) / 5;
+            else v = i == 6 ? 0 : 255;
+            e4_total += count[i] * s_err4[v];
+            e3_total += count[i] * s_err3[v];
+        }
+    }
+    *i4_sum = e4_total;
+    *a3_sum = e3_total;
+}
+
+/* The alpha plane format of a new DXT5 texture, from its first level:
+ * OPENGX_DXT5_ALPHA "i4" or "i8" forces one; by default ("auto") I8 when 4
+ * bits would be further from the DXT5 alpha on average than the decoded
+ * RGB5A3 storage is (alpha that sits on its eighths), I4 otherwise. */
+static bool dxt5_alpha_i8(const uint8_t *src, int blocks)
+{
     const char *env = getenv("OPENGX_DXT5_ALPHA");
-    return env && strcmp(env, "i8") == 0;
+    if (env && strcmp(env, "i8") == 0) return true;
+    if (env && strcmp(env, "i4") == 0) return false;
+    if (!src) return false;
+    uint32_t i4_sum, a3_sum;
+    alpha_to_4_init();
+    dxt5_alpha_errors(src, blocks, &i4_sum, &a3_sum);
+    return i4_sum > a3_sum;
 }
 
 /* Convert a rectangle of bw x bh DXT3/DXT5 blocks into the two planes of a
@@ -421,7 +476,7 @@ static void split_tex_image(GLuint tex_id, GLint level, bool dxt5,
     bool old_chain = !(old.minlevel == 0 && old.maxlevel == 0);
     /* The alpha format is chosen once per texture */
     bool i8 = had_alpha ? (currtex->alpha_plane & OGX_ALPHA_PLANE_I8) != 0 :
-        dxt5 && dxt5_alpha_i8();
+        dxt5 && dxt5_alpha_i8(data, ((width + 3) / 4) * ((height + 3) / 4));
     uint8_t alpha_format = i8 ? GX_TF_I8 : GX_TF_I4;
 
     OgxTextureInfo ti;

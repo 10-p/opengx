@@ -539,6 +539,9 @@ void glGetTexLevelParameteriv(GLenum target, GLint level,
 
     int sizes[6];
     component_sizes(width ? internal_format : 0, sizes);
+    if (target == GL_TEXTURE_2D && width &&
+        (texture_list[curr_tex()].alpha_plane & OGX_ALPHA_PLANE_I8))
+        sizes[3] = 8;
     switch (pname) {
     case GL_TEXTURE_WIDTH: *params = width; break;
     case GL_TEXTURE_HEIGHT: *params = height; break;

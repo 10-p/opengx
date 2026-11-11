@@ -461,9 +461,12 @@ Level sizes: `ceil(w/tw) * ceil(h/th) * 32` bytes (`*64` for RGBA8), with `tw x 
   endpoints become one colour (every index 0). No texel is transparent. GX interpolates 5/8 + 3/8 where S3TC
   says thirds (as for DXT1).
 - Alpha: DXT3's 4 bits are exact in I4; DXT5's interpolated 8-bit alpha is rounded to 4 bits (max error 8/255;
-  RGB5A3 keeps 3 bits of a translucent texel). `OPENGX_DXT5_ALPHA=i8` (environment, read per new texture) stores
-  DXT5 planes as `GX_TF_I8` (exact, 1.5 bytes per texel). `OPENGX_DEBUG=texture` logs per DXT5 level 0 the
-  translucent texels, the I4 and RGB5A3 alpha errors and the smooth-ramp blocks.
+  RGB5A3 keeps 3 bits of a translucent texel, max error 18/255). Per DXT5 texture (from its first level, a sample
+  of at most ~512 blocks) the mean alpha error of I4 is compared with RGB5A3's: where 4 bits would be worse than
+  the decoded storage (alpha sitting on RGB5A3's eighths) the plane is `GX_TF_I8` (exact, 1.5 bytes per texel).
+  `OPENGX_DXT5_ALPHA=i4|i8|auto` (environment, read per new texture; default auto) forces one.
+  `OPENGX_DEBUG=texture` logs per DXT5 level 0 the translucent texels, the I4 and RGB5A3 alpha errors and the
+  smooth-ramp blocks.
 - Drawing: a texture unit whose texture has a plane gets one TEV stage more, before its own: it samples the
   plane (texture map of its own, the unit's texture coordinate; the plane's texture object is built at bind time
   with the colour's size, wrap modes, filters and LOD range, so both sample the same texels and levels) and
@@ -478,5 +481,5 @@ Level sizes: `ceil(w/tw) * ceil(h/th) * 32` bytes (`*64` for RGBA8), with `tw x 
   the GPU when queued draws may read it). A DXT1 sub-image into such a texture is `GL_INVALID_OPERATION`.
   `glGetTexLevelParameteriv` reports `GL_COMPRESSED_RGBA_S3TC_DXT3/DXT5_EXT`, 16 bytes per block, 4 alpha bits.
   `gltexture_` grows by a pointer and a byte of flags (8 KB for the 2048 names).
-- Cost (Dolphin, emulated, 256x256): DXT5 upload 2.8 ms (RGB5A3 10.0 ms), DXT3 1.7 ms; heap 65.5 KB per texture
+- Cost (Dolphin, emulated, 256x256): DXT5 upload 3.1 ms (RGB5A3 10.0 ms), DXT3 1.7 ms; heap 65.5 KB per texture
   (RGB5A3 131 KB); no RGBA scratch buffer (the decoded path allocates w*h*4 bytes per upload).
